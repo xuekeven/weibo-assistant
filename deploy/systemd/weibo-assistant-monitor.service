@@ -1,0 +1,24 @@
+[Unit]
+Description=weibo-assistant Weibo web chat monitor
+Wants=network-online.target
+After=network-online.target weibo-assistant-server.service
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=__APP_DIR__
+Environment=APP_ENV=production
+Environment=HOME=/home/__RUN_USER__
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=__APP_DIR__/bin/weibo-assistant monitor
+Restart=always
+RestartSec=8
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

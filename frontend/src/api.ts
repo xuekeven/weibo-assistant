@@ -1,5 +1,6 @@
 const defaultAPIBase = `${window.location.protocol}//${window.location.hostname}:6001`
 const API_BASE = (import.meta.env.VITE_API_BASE || defaultAPIBase).replace(/\/$/, '')
+const WS_BASE = API_BASE.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')
 
 export type Group = {
   id: number
@@ -46,6 +47,9 @@ export type MonitorStatus = {
   lastHeartbeatAt?: string
   lastError?: string
   updatedAt?: string
+  fresh?: boolean
+  heartbeatAgeSecs?: number
+  staleAfterSecs?: number
 }
 
 export type NotificationEvent = {
@@ -56,6 +60,14 @@ export type NotificationEvent = {
   touser?: string
   errorMessage?: string
   createdAt: string
+}
+
+export type RealtimeEvent = {
+  type: string
+  message?: Message
+  monitorStatus?: MonitorStatus
+  notificationEvent?: NotificationEvent
+  sentAt?: string
 }
 
 type ListResponse<T> = {
@@ -111,4 +123,8 @@ export function getMonitorStatus() {
 
 export function listNotificationEvents(limit = 30) {
   return request<ListResponse<NotificationEvent>>(`/api/notification-events?limit=${limit}`)
+}
+
+export function createRealtimeSocket() {
+  return new WebSocket(`${WS_BASE}/api/ws`)
 }

@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
 
 type MonitorOptions struct {
+	// MonitorOptions 既包含启动参数，也包含采集事件回调。
+	// browser 通过回调报告结果，避免反向依赖 store 或 notifier。
 	URL                 string
 	ProfileDir          string
 	Executable          string
@@ -31,6 +36,10 @@ type MonitorOptions struct {
 	OnProbe             func(context.Context, PageProbe) error
 	OnMessage           func(context.Context, NetworkMessage) error
 	OnImageReference    func(context.Context, NetworkImageReference) error
+	OnBrowserState      func(bool)
+	OnCDPState          func(connected bool, reconnected bool)
+	OnMessagesParsed    func(int)
+	OnTrackedRequests   func(int)
 }
 
 type PageProbe struct {
@@ -101,6 +110,7 @@ type chromeTarget struct {
 }
 
 func RunMonitor(ctx context.Context, opts MonitorOptions) error {
+	// 流程分为四个阶段：校验配置、启动 Chromium、连接 CDP、循环健康检查。
 	if strings.TrimSpace(opts.URL) == "" {
 		return errors.New("browser monitor URL is required")
 	}
@@ -111,7 +121,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		return errors.New("browser debug port must be between 1 and 65535")
 	}
 	if opts.HealthCheckInterval <= 0 {
-		opts.HealthCheckInterval = 30 * time.Second
+		opts.HealthCheckInterval = 60 * time.Second
 	}
 
 	profileDir, err := filepath.Abs(opts.ProfileDir)
@@ -127,6 +137,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		return err
 	}
 
+	// CommandContext 会在 ctx 取消时终止 Chromium，停服时不会残留子进程。
 	cmd := exec.CommandContext(ctx, executable, monitorArgs(opts, profileDir)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -134,6 +145,10 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	slog.Info("starting browser monitor", "executable", executable, "profileDir", profileDir, "url", opts.URL, "headless", opts.Headless, "debugPort", opts.DebugPort)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start browser monitor: %w", err)
+	}
+	if opts.OnBrowserState != nil {
+		opts.OnBrowserState(true)
+		defer opts.OnBrowserState(false)
 	}
 
 	errCh := make(chan error, 1)
@@ -178,9 +193,76 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		}
 	}
 
-	networkErrCh := make(chan error, 1)
-	go func() {
-		networkErrCh <- monitorNetworkEvents(ctx, target.WebSocketDebuggerURL, opts.OnMessage, opts.OnImageReference)
+	type networkMonitorResult struct {
+		generation int
+		err        error
+	}
+	networkErrCh := make(chan networkMonitorResult, 1)
+	var networkCancel context.CancelFunc
+	networkGeneration := 0
+	reconnectAttempt := 0
+	var reconnectTimer *time.Timer
+	var reconnectC <-chan time.Time
+
+	stopReconnectTimer := func() {
+		if reconnectTimer == nil {
+			return
+		}
+		if !reconnectTimer.Stop() {
+			select {
+			case <-reconnectTimer.C:
+			default:
+			}
+		}
+		reconnectC = nil
+	}
+	scheduleNetworkReconnect := func(reason error) {
+		reconnectAttempt++
+		delay := networkReconnectDelay(reconnectAttempt)
+		stopReconnectTimer()
+		if reconnectTimer == nil {
+			reconnectTimer = time.NewTimer(delay)
+		} else {
+			reconnectTimer.Reset(delay)
+		}
+		reconnectC = reconnectTimer.C
+		slog.Warn("network monitor disconnected; scheduling in-process reconnect",
+			"attempt", reconnectAttempt,
+			"retryIn", delay,
+			"error", reason,
+		)
+	}
+	// 页面重载后 debugger URL 可能变化。新监听启动前先取消旧监听，
+	// generation 用来识别已经过期的 goroutine 返回结果。
+	startNetworkMonitor := func(webSocketDebuggerURL string) {
+		stopReconnectTimer()
+		if networkCancel != nil {
+			networkCancel()
+		}
+		networkGeneration++
+		generation := networkGeneration
+		networkCtx, cancel := context.WithCancel(ctx)
+		networkCancel = cancel
+		if opts.OnCDPState != nil {
+			opts.OnCDPState(true, generation > 1)
+		}
+		go func() {
+			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests)
+			select {
+			case networkErrCh <- networkMonitorResult{generation: generation, err: err}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+	startNetworkMonitor(target.WebSocketDebuggerURL)
+	defer func() {
+		stopReconnectTimer()
+		if networkCancel != nil {
+			networkCancel()
+		}
+		if opts.OnCDPState != nil {
+			opts.OnCDPState(false, false)
+		}
 	}()
 
 	ticker := time.NewTicker(opts.HealthCheckInterval)
@@ -208,11 +290,29 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			}
 			return errors.New("browser monitor exited")
 		case <-ticker.C:
-			probe := PageProbe{
-				Status:    "network_listening",
-				URL:       target.URL,
-				Title:     target.Title,
-				CheckedAt: time.Now(),
+			currentTarget, probe := getCurrentPageProbe(ctx, opts.DebugPort)
+			if probe.Status == "page_ok" && currentTarget.WebSocketDebuggerURL != "" {
+				selectCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				selectStatus, selectErr := selectTargetGroup(selectCtx, currentTarget.WebSocketDebuggerURL, TargetGroup{
+					ID:   opts.TargetGroupID,
+					Name: opts.TargetGroupName,
+				})
+				cancel()
+				probe.GroupSelectStatus = selectStatus
+				if selectErr != nil {
+					probe.GroupSelectError = selectErr.Error()
+				}
+				if currentTarget.WebSocketDebuggerURL != target.WebSocketDebuggerURL {
+					slog.Warn("chat page target changed; rebinding network monitor",
+						"oldURL", target.URL,
+						"newURL", currentTarget.URL,
+					)
+					target = currentTarget
+					startNetworkMonitor(target.WebSocketDebuggerURL)
+				}
+				if selectErr == nil {
+					probe.Status = "network_listening"
+				}
 			}
 			slog.Info("monitor heartbeat", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error)
 			if opts.OnProbe != nil {
@@ -220,23 +320,69 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 					slog.Warn("update monitor status failed", "error", err)
 				}
 			}
-		case err := <-networkErrCh:
+			if probe.Status == "login_required" {
+				stopProcess(cmd)
+				return errors.New("weibo login is required")
+			}
+		case result := <-networkErrCh:
+			if result.generation != networkGeneration {
+				continue
+			}
+			if networkCancel != nil {
+				networkCancel()
+				networkCancel = nil
+			}
+			if opts.OnCDPState != nil {
+				opts.OnCDPState(false, false)
+			}
 			if ctx.Err() != nil {
 				stopProcess(cmd)
 				return nil
 			}
-			stopProcess(cmd)
-			if err != nil {
-				return fmt.Errorf("network monitor exited: %w", err)
+			disconnectErr := result.err
+			if disconnectErr == nil {
+				disconnectErr = errors.New("network monitor exited without an error")
 			}
-			return errors.New("network monitor exited")
+			scheduleNetworkReconnect(disconnectErr)
+		case <-reconnectC:
+			reconnectC = nil
+			currentTarget, reconnectProbe := getCurrentPageProbe(ctx, opts.DebugPort)
+			if reconnectProbe.Status == "login_required" {
+				stopProcess(cmd)
+				return errors.New("weibo login is required")
+			}
+			if reconnectProbe.Status != "page_ok" || currentTarget.WebSocketDebuggerURL == "" {
+				scheduleNetworkReconnect(fmt.Errorf("chat page is not ready: status=%s error=%s", reconnectProbe.Status, reconnectProbe.Error))
+				continue
+			}
+			target = currentTarget
+			slog.Info("reconnecting network monitor in current browser process",
+				"attempt", reconnectAttempt,
+				"url", target.URL,
+			)
+			startNetworkMonitor(target.WebSocketDebuggerURL)
 		case <-reloadC:
-			slog.Info("page reload interval reached; opening chat URL again", "url", opts.URL)
-			if err := openURL(ctx, opts.DebugPort, opts.URL); err != nil {
+			slog.Info("page reload interval reached; reloading current chat page", "url", target.URL)
+			if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
 				slog.Warn("page reload failed", "error", err)
 			}
 		}
 	}
+}
+
+// networkReconnectDelay 使用有上限的指数退避：1s、2s、4s……最多 30s。
+func networkReconnectDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Second
+	for current := 1; current < attempt && delay < 30*time.Second; current++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
 func monitorArgs(opts MonitorOptions, profileDir string) []string {
@@ -507,23 +653,15 @@ func classifyPage(url string, title string) string {
 	return "page_open"
 }
 
-func openURL(ctx context.Context, port int, pageURL string) error {
-	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+func reloadPage(ctx context.Context, webSocketDebuggerURL string) error {
+	reloadCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, debugURL(port, "/json/new?"+neturl.QueryEscape(pageURL)), nil)
+	client, err := newCDPClient(reloadCtx, webSocketDebuggerURL)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("debug endpoint returned HTTP %d", resp.StatusCode)
-	}
-	return nil
+	defer client.Close()
+	return client.call(reloadCtx, "Page.reload", map[string]any{"ignoreCache": false}, nil)
 }
 
 func debugURL(port int, path string) string {
@@ -560,16 +698,22 @@ func extractMessageCandidates(ctx context.Context, webSocketDebuggerURL string) 
 
 type networkRequestInfo struct {
 	URL          string
+	RequestURL   string
 	ResourceType string
 	Status       int
 	MimeType     string
+	LastSeenAt   time.Time
 }
+
+const maxTrackedNetworkRequests = 10000
 
 func monitorNetworkEvents(
 	ctx context.Context,
 	webSocketDebuggerURL string,
 	onMessage func(context.Context, NetworkMessage) error,
 	onImageReference func(context.Context, NetworkImageReference) error,
+	onMessagesParsed func(int),
+	onTrackedRequests func(int),
 ) error {
 	if strings.TrimSpace(webSocketDebuggerURL) == "" {
 		return errors.New("websocket debugger URL is required")
@@ -600,13 +744,36 @@ func monitorNetworkEvents(
 		}
 
 		switch envelope.Method {
+		case "Network.requestWillBeSent":
+			var params struct {
+				RequestID string `json:"requestId"`
+				Type      string `json:"type"`
+				Request   struct {
+					URL string `json:"url"`
+				} `json:"request"`
+			}
+			if json.Unmarshal(envelope.Params, &params) == nil {
+				info := requests[params.RequestID]
+				info.URL = params.Request.URL
+				info.RequestURL = params.Request.URL
+				if params.Type != "" {
+					info.ResourceType = params.Type
+				}
+				rememberNetworkRequest(requests, params.RequestID, info, maxTrackedNetworkRequests)
+				if onTrackedRequests != nil {
+					onTrackedRequests(len(requests))
+				}
+			}
 		case "Network.webSocketCreated":
 			var params struct {
 				RequestID string `json:"requestId"`
 				URL       string `json:"url"`
 			}
 			if json.Unmarshal(envelope.Params, &params) == nil {
-				requests[params.RequestID] = networkRequestInfo{URL: params.URL, ResourceType: "WebSocket"}
+				rememberNetworkRequest(requests, params.RequestID, networkRequestInfo{URL: params.URL, RequestURL: params.URL, ResourceType: "WebSocket"}, maxTrackedNetworkRequests)
+				if onTrackedRequests != nil {
+					onTrackedRequests(len(requests))
+				}
 				slog.Info("network websocket created", "requestID", params.RequestID, "url", params.URL)
 			}
 		case "Network.webSocketClosed":
@@ -615,6 +782,10 @@ func monitorNetworkEvents(
 			}
 			if json.Unmarshal(envelope.Params, &params) == nil {
 				info := requests[params.RequestID]
+				delete(requests, params.RequestID)
+				if onTrackedRequests != nil {
+					onTrackedRequests(len(requests))
+				}
 				slog.Info("network websocket closed", "requestID", params.RequestID, "url", info.URL)
 			}
 		case "Network.webSocketFrameReceived":
@@ -633,26 +804,29 @@ func monitorNetworkEvents(
 			}
 			info := requests[params.RequestID]
 			messages := parseNetworkMessages(params.Response.PayloadData)
+			if onMessagesParsed != nil && len(messages) > 0 {
+				onMessagesParsed(len(messages))
+			}
 			for _, message := range messages {
 				if message.MessageType == "recall" {
 					slog.Info("network recall event parsed",
 						"groupID", message.GroupID,
-						"groupName", message.GroupName,
 						"senderID", message.SenderID,
-						"senderName", message.SenderName,
-						"content", clipLogText(message.Content, 240),
+						"contentLength", len([]rune(message.Content)),
+						"contentSHA256", contentLogHash(message.Content),
 					)
+					slog.Debug("network recall content", "content", clipLogText(message.Content, 240))
 					continue
 				}
 				slog.Info("network message parsed",
 					"weiboMessageID", message.WeiboMessageID,
 					"groupID", message.GroupID,
-					"groupName", message.GroupName,
 					"senderID", message.SenderID,
-					"senderName", message.SenderName,
 					"type", message.MessageType,
-					"content", clipLogText(message.Content, 240),
+					"contentLength", len([]rune(message.Content)),
+					"contentSHA256", contentLogHash(message.Content),
 				)
+				slog.Debug("network message content", "weiboMessageID", message.WeiboMessageID, "content", clipLogText(message.Content, 240))
 				if onMessage != nil {
 					if err := onMessage(ctx, message); err != nil {
 						slog.Warn("persist network message failed",
@@ -665,7 +839,7 @@ func monitorNetworkEvents(
 				}
 			}
 			if len(messages) == 0 {
-				slog.Info("network websocket frame received",
+				slog.Debug("network websocket frame received",
 					"requestID", params.RequestID,
 					"url", info.URL,
 					"opcode", params.Response.Opcode,
@@ -685,11 +859,17 @@ func monitorNetworkEvents(
 			if json.Unmarshal(envelope.Params, &params) != nil {
 				continue
 			}
-			requests[params.RequestID] = networkRequestInfo{
-				URL:          params.Response.URL,
-				ResourceType: params.Type,
-				Status:       params.Response.Status,
-				MimeType:     params.Response.MimeType,
+			info := requests[params.RequestID]
+			if info.RequestURL == "" {
+				info.RequestURL = params.Response.URL
+			}
+			info.URL = params.Response.URL
+			info.ResourceType = params.Type
+			info.Status = params.Response.Status
+			info.MimeType = params.Response.MimeType
+			rememberNetworkRequest(requests, params.RequestID, info, maxTrackedNetworkRequests)
+			if onTrackedRequests != nil {
+				onTrackedRequests(len(requests))
 			}
 			if looksLikeMessageURL(params.Response.URL) {
 				slog.Info("network response candidate",
@@ -709,7 +889,24 @@ func monitorNetworkEvents(
 				continue
 			}
 			info := requests[params.RequestID]
-			if onImageReference == nil || !shouldInspectImageReferenceResponse(info, params.EncodedDataLength) {
+			delete(requests, params.RequestID)
+			if onTrackedRequests != nil {
+				onTrackedRequests(len(requests))
+			}
+			if onImageReference == nil {
+				continue
+			}
+			for _, ref := range extractImageReferencesFromURL(info.RequestURL, info.URL) {
+				slog.Info("network image url reference parsed",
+					"sourceURL", clipLogText(ref.SourceURL, 180),
+					"fids", strings.Join(ref.FIDs, ","),
+					"urls", strings.Join(ref.URLs, ","),
+				)
+				if err := onImageReference(ctx, ref); err != nil {
+					slog.Warn("resolve image url reference failed", "sourceURL", ref.SourceURL, "error", err)
+				}
+			}
+			if !shouldInspectImageReferenceResponse(info, params.EncodedDataLength) {
 				continue
 			}
 			body, err := getNetworkResponseBody(ctx, client, params.RequestID)
@@ -733,11 +930,50 @@ func monitorNetworkEvents(
 				RequestID string `json:"requestId"`
 				ErrorText string `json:"errorText"`
 			}
-			if json.Unmarshal(envelope.Params, &params) == nil && looksLikeMessageURL(requests[params.RequestID].URL) {
-				slog.Warn("network request failed", "requestID", params.RequestID, "url", requests[params.RequestID].URL, "error", params.ErrorText)
+			if json.Unmarshal(envelope.Params, &params) == nil {
+				info := requests[params.RequestID]
+				delete(requests, params.RequestID)
+				if onTrackedRequests != nil {
+					onTrackedRequests(len(requests))
+				}
+				if looksLikeMessageURL(info.URL) {
+					slog.Warn("network request failed", "requestID", params.RequestID, "url", info.URL, "error", params.ErrorText)
+				}
 			}
 		}
 	}
+}
+
+func rememberNetworkRequest(requests map[string]networkRequestInfo, requestID string, info networkRequestInfo, maxItems int) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return
+	}
+	if maxItems <= 0 {
+		maxItems = maxTrackedNetworkRequests
+	}
+	if _, exists := requests[requestID]; !exists && len(requests) >= maxItems {
+		type trackedRequestAge struct {
+			id       string
+			lastSeen time.Time
+		}
+		ages := make([]trackedRequestAge, 0, len(requests))
+		for id, candidate := range requests {
+			ages = append(ages, trackedRequestAge{id: id, lastSeen: candidate.LastSeenAt})
+		}
+		sort.Slice(ages, func(i, j int) bool {
+			return ages[i].lastSeen.Before(ages[j].lastSeen)
+		})
+		removeCount := maxItems / 10
+		if removeCount < 1 {
+			removeCount = 1
+		}
+		for index := 0; index < removeCount && index < len(ages); index++ {
+			delete(requests, ages[index].id)
+		}
+	}
+	info.LastSeenAt = time.Now()
+	requests[requestID] = info
 }
 
 func shouldInspectImageReferenceResponse(info networkRequestInfo, encodedLength float64) bool {
@@ -788,7 +1024,7 @@ func extractImageReferencesFromBody(body string, sourceURL string) []NetworkImag
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
-		return nil
+		return extractImageReferencesFromText(body, sourceURL)
 	}
 	collector := imageReferenceCollector{
 		sourceURL: sourceURL,
@@ -798,16 +1034,99 @@ func extractImageReferencesFromBody(body string, sourceURL string) []NetworkImag
 	return collector.refs
 }
 
+func extractImageReferencesFromURL(sourceURL string, imageURL string) []NetworkImageReference {
+	if !looksLikeImageURL(imageURL) {
+		return nil
+	}
+	fids := appendUniqueStrings(nil, collectFIDValuesFromURL(sourceURL)...)
+	fids = appendUniqueStrings(fids, collectFIDValuesFromURL(imageURL)...)
+	if len(fids) == 0 {
+		return nil
+	}
+	return []NetworkImageReference{{
+		FIDs:      fids,
+		URLs:      []string{strings.TrimSpace(imageURL)},
+		SourceURL: sourceURL,
+	}}
+}
+
+func ExtractImageReferencesFromURL(sourceURL string, imageURL string) []NetworkImageReference {
+	return extractImageReferencesFromURL(sourceURL, imageURL)
+}
+
+func extractImageReferencesFromText(body string, sourceURL string) []NetworkImageReference {
+	urls := imageURLPattern.FindAllString(body, -1)
+	fids := fidTextPattern.FindAllStringSubmatch(body, -1)
+	if len(urls) == 0 || len(fids) == 0 {
+		return nil
+	}
+	fidValues := make([]string, 0, len(fids))
+	for _, match := range fids {
+		if len(match) > 1 {
+			fidValues = appendUniqueStrings(fidValues, match[1])
+		}
+	}
+	imageURLs := make([]string, 0, len(urls))
+	for _, rawURL := range urls {
+		imageURLs = appendUniqueStrings(imageURLs, strings.Trim(rawURL, `"'<>`))
+	}
+	if len(fidValues) == 0 || len(imageURLs) == 0 || len(fidValues)*len(imageURLs) > 40 {
+		return nil
+	}
+	refs := make([]NetworkImageReference, 0, len(fidValues))
+	for _, fid := range fidValues {
+		refs = append(refs, NetworkImageReference{
+			FIDs:      []string{fid},
+			URLs:      imageURLs,
+			SourceURL: sourceURL,
+		})
+	}
+	return refs
+}
+
+func collectFIDValuesFromURL(rawURL string) []string {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil
+	}
+	values := make([]string, 0)
+	for key, items := range parsed.Query() {
+		if !isFIDKey(strings.ToLower(key)) {
+			continue
+		}
+		for _, item := range items {
+			values = appendUniqueStrings(values, item)
+		}
+	}
+	for _, match := range fidURLPattern.FindAllStringSubmatch(rawURL, -1) {
+		if len(match) > 1 {
+			values = appendUniqueStrings(values, match[1])
+		}
+	}
+	return values
+}
+
 func looksLikeImageReferenceBody(body string) bool {
 	lower := strings.ToLower(body)
-	return strings.Contains(lower, "fid") &&
+	return (strings.Contains(lower, "fid") ||
+		strings.Contains(lower, "pic_id") ||
+		strings.Contains(lower, "picid") ||
+		strings.Contains(lower, "\"pid\"")) &&
 		(strings.Contains(lower, "sinaimg.cn") ||
+			strings.Contains(lower, "msget_thumbnail") ||
+			strings.Contains(lower, "upload.api.weibo.com") ||
 			strings.Contains(lower, ".jpg") ||
 			strings.Contains(lower, ".jpeg") ||
 			strings.Contains(lower, ".png") ||
 			strings.Contains(lower, ".webp") ||
 			strings.Contains(lower, ".gif"))
 }
+
+var (
+	imageURLPattern = regexp.MustCompile(`https?://[^"'\s<>]+?(?:(?:\.jpg|\.jpeg|\.png|\.webp|\.gif)(?:\?[^"'\s<>]*)?|msget_thumbnail\?[^"'\s<>]+)`)
+	fidTextPattern  = regexp.MustCompile(`(?i)(?:fid|fids|fidstr|file[_-]?id|pic[_-]?id|picid|pid)["'\s:=\[]+([A-Za-z0-9._:-]+)`)
+	fidURLPattern   = regexp.MustCompile(`(?i)(?:fid|fileid|pic[_-]?id|picid|pid)[=/_-]([A-Za-z0-9.:-]+)`)
+)
 
 type imageReferenceCollector struct {
 	sourceURL string
@@ -886,7 +1205,12 @@ func (c *imageReferenceCollector) emit(scope imageReferenceScope) {
 }
 
 func isFIDKey(key string) bool {
-	return key == "fid" || key == "fids" || key == "file_id" || key == "fileid"
+	switch key {
+	case "fid", "fids", "fidstr", "fid_string", "file_id", "fileid", "pic_id", "picid", "pic_ids", "picids", "pid":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectFIDValues(value any) []string {
@@ -1132,10 +1456,22 @@ func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []jso
 
 	urls := extractImageURLs(rawInfo)
 	if len(urls) == 0 {
-		return []NetworkAttachment{{
-			AttachmentType: "image",
-			Meta:           imageAttachmentMeta(mediaType, fids, ""),
-		}}
+		attachments := make([]NetworkAttachment, 0, max(1, len(fids)))
+		for _, fid := range fids {
+			url := weiboThumbnailURL(fid.String())
+			attachments = append(attachments, NetworkAttachment{
+				AttachmentType: "image",
+				URL:            url,
+				Meta:           imageAttachmentMeta(mediaType, []json.Number{fid}, url),
+			})
+		}
+		if len(attachments) == 0 {
+			return []NetworkAttachment{{
+				AttachmentType: "image",
+				Meta:           imageAttachmentMeta(mediaType, fids, ""),
+			}}
+		}
+		return attachments
 	}
 
 	attachments := make([]NetworkAttachment, 0, len(urls))
@@ -1147,6 +1483,14 @@ func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []jso
 		})
 	}
 	return attachments
+}
+
+func weiboThumbnailURL(fid string) string {
+	fid = strings.TrimSpace(fid)
+	if fid == "" {
+		return ""
+	}
+	return "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=" + neturl.QueryEscape(fid) + "&high=240&width=240&size=111,240&source=209678993&imageType=origin"
 }
 
 func imageAttachmentMeta(mediaType int, fids []json.Number, url string) json.RawMessage {
@@ -1224,6 +1568,8 @@ func looksLikeImageURL(value string) bool {
 	}
 	lower := strings.ToLower(raw)
 	return strings.Contains(lower, "sinaimg.cn") ||
+		strings.Contains(lower, "upload.api.weibo.com/2/mss/msget_thumbnail") ||
+		strings.Contains(lower, "api.weibo.com/2/mss/msget_thumbnail") ||
 		strings.Contains(lower, "weibo.cn") && strings.Contains(lower, "image") ||
 		strings.Contains(lower, ".jpg") ||
 		strings.Contains(lower, ".jpeg") ||
@@ -1321,9 +1667,9 @@ func selectTargetGroup(ctx context.Context, webSocketDebuggerURL string, target 
 		status += ":" + result.Reason
 	}
 	if result.Text != "" {
-		slog.Info("target group selection", "status", result.Status, "text", result.Text, "idHit", result.IDHit)
+		slog.Debug("target group selection", "status", result.Status, "text", result.Text, "idHit", result.IDHit)
 	} else {
-		slog.Info("target group selection", "status", result.Status, "reason", result.Reason, "sessions", strings.Join(result.Sessions, " | "))
+		slog.Debug("target group selection", "status", result.Status, "reason", result.Reason, "sessions", strings.Join(result.Sessions, " | "))
 	}
 	return status, nil
 }
@@ -1345,7 +1691,7 @@ func logMessageCandidates(probe PageProbe) {
 		limit = 10
 	}
 	for _, candidate := range probe.MessageCandidates[:limit] {
-		slog.Info("message candidate",
+		slog.Debug("message candidate",
 			"index", candidate.Index,
 			"score", candidate.Score,
 			"tag", candidate.Tag,
@@ -1363,6 +1709,11 @@ func logMessageCandidates(probe PageProbe) {
 	if len(probe.MessageCandidates) > limit {
 		slog.Info("message candidates omitted", "count", len(probe.MessageCandidates)-limit)
 	}
+}
+
+func contentLogHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:8])
 }
 
 func clipLogText(value string, max int) string {

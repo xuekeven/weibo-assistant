@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/xuekeven/weibo-assistant/internal/browser"
 	"github.com/xuekeven/weibo-assistant/internal/config"
 	"github.com/xuekeven/weibo-assistant/internal/httpapi"
@@ -18,6 +20,7 @@ import (
 )
 
 func RunServer(ctx context.Context, cfg config.Config) error {
+	// 依赖的创建顺序也是关闭顺序：数据库 -> 迁移 -> API。
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -27,26 +30,33 @@ func RunServer(ctx context.Context, cfg config.Config) error {
 	if err := migrate.Apply(ctx, st); err != nil {
 		return err
 	}
-	if err := st.UpdateMonitorStatus(ctx, "server_started", "", ""); err != nil {
-		return err
-	}
-
 	notify := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
 	api := httpapi.NewServer(cfg, st, notify)
 	server := &http.Server{
 		Addr:              api.Addr(),
 		Handler:           api.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
+	// HTTP 服务和 PostgreSQL 实时事件监听并行运行。
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("api server listening", "addr", server.Addr)
 		errCh <- server.ListenAndServe()
 	}()
+	go func() {
+		if err := api.RunRealtime(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("realtime listener exited", "error", err)
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
+		// 收到 SIGTERM 后最多等待 10 秒，让正在处理的 HTTP 请求正常结束。
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
@@ -68,18 +78,57 @@ func RunLogin(ctx context.Context, cfg config.Config) error {
 }
 
 func RunMonitor(ctx context.Context, cfg config.Config) error {
+	// RunMonitor 是监控进程的“装配函数”。具体采集在 browser，持久化在 store，
+	// 这里负责启动后台任务并把 browser 的事件回调连接到业务处理。
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if err := migrate.Apply(ctx, st); err != nil {
+		return err
+	}
 
 	if err := st.UpdateMonitorStatus(ctx, "monitor_starting", cfg.WeiboChatURL, ""); err != nil {
 		return err
 	}
-	notify := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
-	imageURLByFID := make(map[string]string)
+	if _, err := st.SyncEnvironmentNotificationRule(ctx, store.EnvironmentNotificationRuleParams{
+		WeiboGroupID:  cfg.TargetGroupID,
+		GroupName:     cfg.TargetGroupName,
+		WeiboSenderID: cfg.TargetSenderID,
+		SenderName:    cfg.TargetSenderName,
+	}); err != nil {
+		return fmt.Errorf("sync environment notification rule: %w", err)
+	}
+	// 指标上报和通知投递是独立 goroutine；退出前等待它们结束，避免丢失收尾操作。
+	metrics := newMonitorMetrics()
+	metricsCtx, cancelMetrics := context.WithCancel(ctx)
+	metricsDone := make(chan struct{})
+	go func() {
+		defer close(metricsDone)
+		runMetricsReporter(metricsCtx, st, metrics)
+	}()
+	defer func() {
+		cancelMetrics()
+		<-metricsDone
+	}()
+	imageURLByFID := newImageURLCache(cfg.ImageCacheTTL, cfg.ImageCacheMaxItems)
+	if strings.TrimSpace(cfg.WeworkRelayAPIKey) != "" {
+		workerCtx, cancelWorker := context.WithCancel(ctx)
+		workerDone := make(chan struct{})
+		go func() {
+			defer close(workerDone)
+			runNotificationWorker(workerCtx, cfg, st, metrics)
+		}()
+		defer func() {
+			cancelWorker()
+			<-workerDone
+		}()
+	} else {
+		slog.Warn("notification worker disabled because WEWORK_RELAY_API_KEY is empty")
+	}
 
+	// browser 不直接访问数据库。它发现事件后调用下面的 OnXxx 回调。
 	return browser.RunMonitor(ctx, browser.MonitorOptions{
 		URL:                 cfg.WeiboChatURL,
 		ProfileDir:          cfg.WeiboProfileDir,
@@ -92,14 +141,22 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		TargetGroupID:       cfg.TargetGroupID,
 		TargetGroupName:     cfg.TargetGroupName,
 		OnProbe: func(probeCtx context.Context, probe browser.PageProbe) error {
-			return st.UpdateMonitorStatus(probeCtx, probe.Status, probe.URL, probe.Error)
+			// 心跳既更新健康状态，也尝试用 DOM 中的新图片地址补全旧附件。
+			if err := st.UpdateMonitorStatus(probeCtx, probe.Status, probe.URL, probe.Error); err != nil {
+				return err
+			}
+			err := resolveProbeImageCandidates(probeCtx, st, imageURLByFID, probe)
+			metrics.imageCacheItems.Store(int64(imageURLByFID.Len()))
+			return err
 		},
 		OnMessage: func(messageCtx context.Context, message browser.NetworkMessage) error {
+			// 这里完成 browser.NetworkMessage -> store.CreateMessageParams 的层间转换。
 			if cfg.TargetGroupID != "" && message.GroupID != cfg.TargetGroupID {
 				slog.Info("ignore message from non-target group", "groupID", message.GroupID, "targetGroupID", cfg.TargetGroupID)
 				return nil
 			}
 			enrichNetworkAttachmentsWithImageCache(message.Attachments, imageURLByFID)
+			notification, targetMatched := notificationForNetworkMessage(cfg, message)
 			params := store.CreateMessageParams{
 				WeiboMessageID: message.WeiboMessageID,
 				Group: store.UpsertGroupParams{
@@ -112,34 +169,51 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 					AvatarURL:   message.SenderAvatar,
 					Raw:         json.RawMessage(`null`),
 				},
-				MessageType: message.MessageType,
-				Content:     message.Content,
-				SentAt:      message.SentAt,
-				Source:      message.Source,
-				DedupeKey:   message.DedupeKey,
-				Attachments: storeAttachmentsFromNetwork(message.Attachments),
-				Raw:         message.Raw,
+				MessageType:  message.MessageType,
+				Content:      message.Content,
+				SentAt:       message.SentAt,
+				Source:       message.Source,
+				DedupeKey:    message.DedupeKey,
+				Attachments:  storeAttachmentsFromNetwork(message.Attachments),
+				Raw:          message.Raw,
+				Notification: notification,
 			}
 			result, err := st.CreateMessage(messageCtx, params)
 			if err != nil {
+				metrics.persistFailure.Add(1)
 				return err
+			}
+			metrics.persistSuccess.Add(1)
+			if !result.Created {
+				metrics.dedupeTotal.Add(1)
+			}
+			if err := st.MarkMonitorMessage(messageCtx); err != nil {
+				slog.Warn("update monitor last message time failed", "error", err)
 			}
 			slog.Info("network message persisted",
 				"created", result.Created,
 				"messageID", result.Message.ID,
 				"weiboMessageID", result.Message.WeiboMessageID,
 				"groupID", result.Message.GroupID,
-				"senderName", result.Message.SenderName,
+				"senderID", result.Message.WeiboSenderID,
 			)
-			maybeNotifyTargetSender(messageCtx, cfg, st, notify, result)
+			if targetMatched && notification == nil && result.Created {
+				slog.Warn("target message matched but wework relay is not configured",
+					"messageID", result.Message.ID,
+					"weiboMessageID", result.Message.WeiboMessageID,
+				)
+				recordNotificationEvent(messageCtx, st, cfg, result.Message, "skipped", nil, "WEWORK_RELAY_URL or WEWORK_RELAY_API_KEY is empty")
+			} else if result.NotificationsQueued > 0 {
+				slog.Info("message notifications queued", "messageID", result.Message.ID, "rules", result.NotificationsQueued)
+			}
 			return nil
 		},
 		OnImageReference: func(refCtx context.Context, ref browser.NetworkImageReference) error {
+			// 图片 URL 和消息可能来自不同网络响应，所以先按 fid 缓存，再补写数据库。
+			defer metrics.imageCacheItems.Store(int64(imageURLByFID.Len()))
 			for _, fid := range ref.FIDs {
 				for _, imageURL := range ref.URLs {
-					if fid != "" && imageURL != "" {
-						imageURLByFID[fid] = imageURL
-					}
+					imageURLByFID.Set(fid, imageURL)
 					count, err := st.ResolveImageAttachmentURL(refCtx, store.ResolveImageAttachmentParams{
 						FID:       fid,
 						URL:       imageURL,
@@ -155,16 +229,57 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			}
 			return nil
 		},
+		OnBrowserState: func(running bool) {
+			metrics.browserRunning.Store(running)
+		},
+		OnCDPState: func(connected bool, reconnected bool) {
+			metrics.cdpConnected.Store(connected)
+			if reconnected {
+				metrics.cdpReconnects.Add(1)
+			}
+		},
+		OnMessagesParsed: func(count int) {
+			metrics.recordParsed(count)
+		},
+		OnTrackedRequests: func(count int) {
+			metrics.trackedRequests.Store(int64(count))
+		},
 	})
 }
 
-func enrichNetworkAttachmentsWithImageCache(attachments []browser.NetworkAttachment, imageURLByFID map[string]string) {
+func resolveProbeImageCandidates(ctx context.Context, st *store.Store, imageURLByFID *imageURLCache, probe browser.PageProbe) error {
+	for _, candidate := range probe.MessageCandidates {
+		for _, imageURL := range candidate.Images {
+			for _, ref := range browser.ExtractImageReferencesFromURL(imageURL, imageURL) {
+				for _, fid := range ref.FIDs {
+					for _, url := range ref.URLs {
+						imageURLByFID.Set(fid, url)
+						count, err := st.ResolveImageAttachmentURL(ctx, store.ResolveImageAttachmentParams{
+							FID:       fid,
+							URL:       url,
+							SourceURL: ref.SourceURL,
+						})
+						if err != nil {
+							return err
+						}
+						if count > 0 {
+							slog.Info("image attachment resolved from dom", "fid", fid, "url", url, "updated", count)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func enrichNetworkAttachmentsWithImageCache(attachments []browser.NetworkAttachment, imageURLByFID *imageURLCache) {
 	for index := range attachments {
 		if attachments[index].AttachmentType != "image" || strings.TrimSpace(attachments[index].URL) != "" {
 			continue
 		}
 		for _, fid := range networkAttachmentFIDs(attachments[index]) {
-			if imageURL := imageURLByFID[fid]; strings.TrimSpace(imageURL) != "" {
+			if imageURL, ok := imageURLByFID.Get(fid); ok {
 				attachments[index].URL = imageURL
 				return
 			}
@@ -198,41 +313,139 @@ func storeAttachmentsFromNetwork(attachments []browser.NetworkAttachment) []stor
 	return result
 }
 
-func maybeNotifyTargetSender(ctx context.Context, cfg config.Config, st *store.Store, notify *notifier.WeworkClient, result store.CreateMessageResult) {
-	if !result.Created {
-		return
+func notificationForNetworkMessage(cfg config.Config, message browser.NetworkMessage) (*store.EnqueueNotificationParams, bool) {
+	storedMessage := store.Message{
+		WeiboSenderID: message.SenderID,
+		SenderName:    message.SenderName,
+		MessageType:   message.MessageType,
+		Content:       message.Content,
+		SentAt:        message.SentAt,
+		CapturedAt:    time.Now(),
 	}
-	if !hasTargetSender(cfg) || !messageMatchesTargetSender(cfg, result.Message) {
-		return
+	targetMatched := false
+	if hasTargetSender(cfg) {
+		targetMatched = messageMatchesTargetSender(cfg, storedMessage)
 	}
 	if strings.TrimSpace(cfg.WeworkRelayURL) == "" || strings.TrimSpace(cfg.WeworkRelayAPIKey) == "" {
-		slog.Warn("target message matched but wework relay is not configured",
-			"messageID", result.Message.ID,
-			"weiboMessageID", result.Message.WeiboMessageID,
-			"senderName", result.Message.SenderName,
-			"weiboSenderID", result.Message.WeiboSenderID,
-		)
-		recordNotificationEvent(ctx, st, cfg, result.Message, "skipped", nil, "WEWORK_RELAY_URL or WEWORK_RELAY_API_KEY is empty")
-		return
+		return nil, targetMatched
 	}
+	return &store.EnqueueNotificationParams{
+		Content:     buildTargetNotificationContent(storedMessage),
+		RelayURL:    cfg.WeworkRelayURL,
+		ToUser:      cfg.WeworkRelayToUser,
+		MaxAttempts: cfg.NotificationMaxAttempts,
+	}, targetMatched
+}
 
-	content := buildTargetNotificationContent(result.Message)
-	response, err := notify.SendText(ctx, content)
-	if err != nil {
-		slog.Error("target message wework notification failed",
-			"error", err,
-			"messageID", result.Message.ID,
-			"weiboMessageID", result.Message.WeiboMessageID,
-		)
-		recordNotificationEvent(ctx, st, cfg, result.Message, "failed", &response, err.Error())
-		return
+func runNotificationWorker(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics) {
+	// worker 每次只领取一个任务。数据库的 SKIP LOCKED 保证未来启动多个 worker 时
+	// 同一任务不会被同时发送。
+	pollInterval := cfg.NotificationPollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Second
 	}
-	slog.Info("target message wework notification sent",
-		"messageID", result.Message.ID,
-		"weiboMessageID", result.Message.WeiboMessageID,
-		"senderName", result.Message.SenderName,
-	)
-	recordNotificationEvent(ctx, st, cfg, result.Message, "sent", &response, "")
+	for {
+		job, err := st.ClaimNotificationOutbox(ctx, 5*time.Minute)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// 没有待发送任务不是错误，等待一小段时间后继续轮询。
+			if !waitContext(ctx, pollInterval) {
+				return
+			}
+			continue
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("claim notification outbox failed", "error", err)
+			if !waitContext(ctx, 3*time.Second) {
+				return
+			}
+			continue
+		}
+
+		client := notifier.NewWeworkClient(job.RelayURL, cfg.WeworkRelayAPIKey, job.ToUser)
+		response, sendErr := client.SendText(ctx, job.Content)
+		if sendErr == nil {
+			if err := st.MarkNotificationOutboxSent(ctx, job.ID); err != nil {
+				slog.Error("mark notification outbox sent failed", "jobID", job.ID, "error", err)
+				continue
+			}
+			recordOutboxNotificationEvent(ctx, st, job, "sent", &response, "")
+			metrics.notifySent.Add(1)
+			slog.Info("target message wework notification sent", "messageID", job.MessageID, "attempt", job.AttemptCount)
+			continue
+		}
+
+		// 失败后使用指数退避，减少中继服务故障时的请求压力。
+		nextAttemptAt := time.Now().Add(notificationRetryDelay(job.AttemptCount))
+		finalFailure, err := st.MarkNotificationOutboxFailed(ctx, job, sendErr, nextAttemptAt)
+		if err != nil {
+			slog.Error("mark notification outbox failed", "jobID", job.ID, "error", err)
+			continue
+		}
+		status := "retrying"
+		if finalFailure {
+			status = "failed"
+			metrics.notifyFailed.Add(1)
+		} else {
+			metrics.notifyRetry.Add(1)
+		}
+		recordOutboxNotificationEvent(ctx, st, job, status, &response, sendErr.Error())
+		slog.Warn("target message wework notification failed",
+			"messageID", job.MessageID,
+			"attempt", job.AttemptCount,
+			"maxAttempts", job.MaxAttempts,
+			"final", finalFailure,
+			"nextAttemptAt", nextAttemptAt,
+			"error", sendErr,
+		)
+	}
+}
+
+func notificationRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 5 * time.Second
+	for index := 1; index < attempt && delay < 15*time.Minute; index++ {
+		delay *= 2
+	}
+	if delay > 15*time.Minute {
+		return 15 * time.Minute
+	}
+	return delay
+}
+
+func waitContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func recordOutboxNotificationEvent(ctx context.Context, st *store.Store, job store.NotificationOutboxJob, status string, response *notifier.SendResponse, errorMessage string) {
+	requestPayload, _ := json.Marshal(map[string]string{
+		"content": job.Content,
+		"touser":  job.ToUser,
+	})
+	responsePayload, _ := json.Marshal(response)
+	if _, err := st.CreateNotificationEvent(ctx, store.CreateNotificationEventParams{
+		RuleID:          job.RuleID,
+		MessageID:       job.MessageID,
+		Status:          status,
+		RelayURL:        job.RelayURL,
+		ToUser:          job.ToUser,
+		RequestPayload:  requestPayload,
+		ResponsePayload: responsePayload,
+		ErrorMessage:    errorMessage,
+	}); err != nil {
+		slog.Error("record notification event failed", "error", err, "messageID", job.MessageID, "status", status)
+	}
 }
 
 func hasTargetSender(cfg config.Config) bool {
@@ -249,15 +462,16 @@ func messageMatchesTargetSender(cfg config.Config, message store.Message) bool {
 func buildTargetNotificationContent(message store.Message) string {
 	sentAt := "未知时间"
 	if message.SentAt != nil {
-		sentAt = message.SentAt.Format("2006-01-02 15:04:05")
+		sentAt = message.SentAt.Format("1月2日15点04分")
+	} else if !message.CapturedAt.IsZero() {
+		sentAt = message.CapturedAt.Format("1月2日15点04分")
 	}
 	content := strings.TrimSpace(message.Content)
 	if content == "" {
 		content = fmt.Sprintf("[%s]", message.MessageType)
 	}
 	content = truncateRunes(content, 1500)
-	return fmt.Sprintf("微博群聊新消息\n群聊：%s\n发送人：%s\n时间：%s\n内容：%s",
-		fallbackText(message.GroupName, message.WeiboGroupID),
+	return fmt.Sprintf("@%s 在%s在群里发消息：\n%s",
 		fallbackText(message.SenderName, message.WeiboSenderID),
 		sentAt,
 		content,

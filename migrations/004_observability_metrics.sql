@@ -1,0 +1,20 @@
+create table if not exists monitor_runtime_metrics (
+  service_name text primary key,
+  browser_running boolean not null default false,
+  cdp_connected boolean not null default false,
+  cdp_reconnect_total bigint not null default 0,
+  messages_parsed_total bigint not null default 0,
+  messages_parsed_last_minute bigint not null default 0,
+  persist_success_total bigint not null default 0,
+  persist_failure_total bigint not null default 0,
+  dedupe_total bigint not null default 0,
+  notification_sent_total bigint not null default 0,
+  notification_retry_total bigint not null default 0,
+  notification_failed_total bigint not null default 0,
+  tracked_requests bigint not null default 0,
+  image_cache_items bigint not null default 0,
+  alloc_bytes bigint not null default 0,
+  goroutines bigint not null default 0,
+  process_started_at timestamptz not null,
+  updated_at timestamptz not null default now()
+);

@@ -14,6 +14,7 @@ import (
 )
 
 type WeworkClient struct {
+	// client 设置统一超时，避免第三方服务无响应时永久占住 outbox worker。
 	baseURL string
 	apiKey  string
 	toUser  string
@@ -106,6 +107,7 @@ func (c *WeworkClient) SendImage(ctx context.Context, imagePath string) (SendRes
 }
 
 func (c *WeworkClient) doSend(req *http.Request) (SendResponse, error) {
+	// 中继可能用 HTTP 200 返回业务错误，因此 HTTP 状态和 errcode 都要检查。
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return SendResponse{}, err

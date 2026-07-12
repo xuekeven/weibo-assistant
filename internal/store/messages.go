@@ -7,11 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	neturl "net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type messageDB interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
 
 type Group struct {
 	ID            int64      `json:"id"`
@@ -79,21 +88,23 @@ type UpsertUserParams struct {
 }
 
 type CreateMessageParams struct {
-	WeiboMessageID string            `json:"weiboMessageId"`
-	Group          UpsertGroupParams `json:"group"`
-	Sender         UpsertUserParams  `json:"sender"`
-	MessageType    string            `json:"messageType"`
-	Content        string            `json:"content"`
-	SentAt         *time.Time        `json:"sentAt"`
-	Source         string            `json:"source"`
-	DedupeKey      string            `json:"dedupeKey"`
-	Raw            json.RawMessage   `json:"raw"`
-	Attachments    []Attachment      `json:"attachments"`
+	WeiboMessageID string                     `json:"weiboMessageId"`
+	Group          UpsertGroupParams          `json:"group"`
+	Sender         UpsertUserParams           `json:"sender"`
+	MessageType    string                     `json:"messageType"`
+	Content        string                     `json:"content"`
+	SentAt         *time.Time                 `json:"sentAt"`
+	Source         string                     `json:"source"`
+	DedupeKey      string                     `json:"dedupeKey"`
+	Raw            json.RawMessage            `json:"raw"`
+	Attachments    []Attachment               `json:"attachments"`
+	Notification   *EnqueueNotificationParams `json:"-"`
 }
 
 type CreateMessageResult struct {
-	Message Message `json:"message"`
-	Created bool    `json:"created"`
+	Message             Message `json:"message"`
+	Created             bool    `json:"created"`
+	NotificationsQueued int     `json:"notificationsQueued"`
 }
 
 type ResolveImageAttachmentParams struct {
@@ -119,19 +130,24 @@ type ListMessagesParams struct {
 	Query         string
 	Before        *time.Time
 	Limit         int
+	IncludeRaw    bool
 }
 
 func (s *Store) UpsertGroup(ctx context.Context, params UpsertGroupParams) (Group, error) {
+	return upsertGroup(ctx, s.pool, params)
+}
+
+func upsertGroup(ctx context.Context, db messageDB, params UpsertGroupParams) (Group, error) {
 	name := strings.TrimSpace(params.Name)
 	if name == "" {
 		return Group{}, errors.New("group name is required")
 	}
 	if params.WeiboGroupID == "" {
-		return s.upsertGroupByName(ctx, name, params.AvatarURL)
+		return upsertGroupByName(ctx, db, name, params.AvatarURL)
 	}
 
 	var group Group
-	err := s.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		insert into weibo_groups (weibo_group_id, name, avatar_url, updated_at)
 		values (nullif($1, ''), $2, nullif($3, ''), now())
 		on conflict (weibo_group_id) do update set
@@ -157,9 +173,9 @@ func (s *Store) UpsertGroup(ctx context.Context, params UpsertGroupParams) (Grou
 	return group, err
 }
 
-func (s *Store) upsertGroupByName(ctx context.Context, name string, avatarURL string) (Group, error) {
+func upsertGroupByName(ctx context.Context, db messageDB, name string, avatarURL string) (Group, error) {
 	var group Group
-	err := s.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		with existing as (
 		  select id from weibo_groups where weibo_group_id is null and name = $1 limit 1
 		), updated as (
@@ -196,16 +212,20 @@ func (s *Store) upsertGroupByName(ctx context.Context, name string, avatarURL st
 }
 
 func (s *Store) UpsertUser(ctx context.Context, params UpsertUserParams) (User, error) {
+	return upsertUser(ctx, s.pool, params)
+}
+
+func upsertUser(ctx context.Context, db messageDB, params UpsertUserParams) (User, error) {
 	nickname := strings.TrimSpace(params.Nickname)
 	if nickname == "" {
 		return User{}, errors.New("sender nickname is required")
 	}
 	if params.WeiboUserID == "" {
-		return s.upsertUserByNickname(ctx, nickname, params)
+		return upsertUserByNickname(ctx, db, nickname, params)
 	}
 
 	var user User
-	err := s.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		insert into weibo_users (weibo_user_id, nickname, avatar_url, profile_url, raw, updated_at)
 		values (nullif($1, ''), $2, nullif($3, ''), nullif($4, ''), nullif($5, 'null')::jsonb, now())
 		on conflict (weibo_user_id) do update set
@@ -235,9 +255,9 @@ func (s *Store) UpsertUser(ctx context.Context, params UpsertUserParams) (User, 
 	return user, err
 }
 
-func (s *Store) upsertUserByNickname(ctx context.Context, nickname string, params UpsertUserParams) (User, error) {
+func upsertUserByNickname(ctx context.Context, db messageDB, nickname string, params UpsertUserParams) (User, error) {
 	var user User
-	err := s.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		with existing as (
 		  select id from weibo_users where weibo_user_id is null and nickname = $1 limit 1
 		), updated as (
@@ -285,22 +305,32 @@ func (s *Store) CreateMessage(ctx context.Context, params CreateMessageParams) (
 		params.MessageType = "text"
 	}
 
-	group, err := s.UpsertGroup(ctx, params.Group)
+	// 群、用户、消息、附件和通知任务必须作为一个整体提交。
+	// 任一步失败都会回滚，避免出现“消息存在但附件或通知任务丢失”的半完成状态。
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return CreateMessageResult{}, err
 	}
-	user, err := s.UpsertUser(ctx, params.Sender)
+	defer tx.Rollback(ctx)
+
+	group, err := upsertGroup(ctx, tx, params.Group)
+	if err != nil {
+		return CreateMessageResult{}, err
+	}
+	user, err := upsertUser(ctx, tx, params.Sender)
 	if err != nil {
 		return CreateMessageResult{}, err
 	}
 
+	// 微博事件可能因重连被重复采集。dedupe_key 是数据库级幂等键，
+	// 比仅在内存中去重可靠，因为服务重启后仍然有效。
 	dedupeKey := strings.TrimSpace(params.DedupeKey)
 	if dedupeKey == "" {
 		dedupeKey = BuildDedupeKey(params, group.ID, user.ID)
 	}
 
 	var message Message
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		insert into weibo_messages (
 		  weibo_message_id, group_id, sender_id, message_type, content,
 		  sent_at, source, dedupe_key, raw
@@ -337,15 +367,35 @@ func (s *Store) CreateMessage(ctx context.Context, params CreateMessageParams) (
 		&message.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		existing, err := s.GetMessageByDedupeKey(ctx, dedupeKey)
-		if err == nil && len(existing.Attachments) == 0 && len(params.Attachments) > 0 {
-			attachments, insertErr := s.InsertAttachments(ctx, existing.ID, params.Attachments)
+		// ON CONFLICT DO NOTHING 在重复消息时不会返回行。ErrNoRows 在这里
+		// 不是故障，而是“这条消息已存在”的正常分支。
+		existing, loadErr := getMessageByDedupeKey(ctx, tx, dedupeKey)
+		if loadErr != nil {
+			return CreateMessageResult{}, loadErr
+		}
+		updated := false
+		if len(existing.Attachments) == 0 && len(params.Attachments) > 0 {
+			attachments, insertErr := insertAttachments(ctx, tx, existing.ID, params.Attachments)
 			if insertErr != nil {
 				return CreateMessageResult{}, insertErr
 			}
 			existing.Attachments = attachments
+			updated = true
 		}
-		return CreateMessageResult{Message: existing, Created: false}, err
+		notificationsQueued := 0
+		if params.Notification != nil {
+			notificationsQueued, err = enqueueMatchingNotifications(ctx, tx, existing.ID, group, user, params.MessageType, *params.Notification)
+			if err != nil {
+				return CreateMessageResult{}, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return CreateMessageResult{}, err
+		}
+		if updated {
+			s.notifyRealtimeBestEffort(ctx, RealtimeEvent{Type: "message_updated", MessageID: existing.ID})
+		}
+		return CreateMessageResult{Message: existing, Created: false, NotificationsQueued: notificationsQueued}, nil
 	}
 	if err != nil {
 		return CreateMessageResult{}, err
@@ -356,27 +406,44 @@ func (s *Store) CreateMessage(ctx context.Context, params CreateMessageParams) (
 	message.SenderName = user.Nickname
 	message.WeiboSenderID = user.WeiboUserID
 	if len(params.Attachments) > 0 {
-		attachments, err := s.InsertAttachments(ctx, message.ID, params.Attachments)
+		attachments, err := insertAttachments(ctx, tx, message.ID, params.Attachments)
 		if err != nil {
 			return CreateMessageResult{}, err
 		}
 		message.Attachments = attachments
 	}
 
-	if err := s.updateGroupLastMessageAt(ctx, group.ID, params.SentAt); err != nil {
+	if err := updateGroupLastMessageAt(ctx, tx, group.ID, params.SentAt); err != nil {
 		return CreateMessageResult{}, err
 	}
-	return CreateMessageResult{Message: message, Created: true}, nil
+	notificationsQueued := 0
+	if params.Notification != nil {
+		notificationsQueued, err = enqueueMatchingNotifications(ctx, tx, message.ID, group, user, params.MessageType, *params.Notification)
+		if err != nil {
+			return CreateMessageResult{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CreateMessageResult{}, err
+	}
+	// 实时通知发生在事务提交之后。即使通知失败，已提交的消息也不能回滚。
+	s.notifyRealtimeBestEffort(ctx, RealtimeEvent{Type: "message_created", MessageID: message.ID})
+	return CreateMessageResult{Message: message, Created: true, NotificationsQueued: notificationsQueued}, nil
 }
 
 func (s *Store) InsertAttachments(ctx context.Context, messageID int64, attachments []Attachment) ([]Attachment, error) {
+	return insertAttachments(ctx, s.pool, messageID, attachments)
+}
+
+func insertAttachments(ctx context.Context, db messageDB, messageID int64, attachments []Attachment) ([]Attachment, error) {
 	result := make([]Attachment, 0, len(attachments))
 	for _, attachment := range attachments {
 		if strings.TrimSpace(attachment.AttachmentType) == "" {
 			attachment.AttachmentType = "unknown"
 		}
+		normalizeImageAttachmentURL(&attachment)
 		var saved Attachment
-		err := s.pool.QueryRow(ctx, `
+		err := db.QueryRow(ctx, `
 			insert into weibo_message_attachments (message_id, attachment_type, url, local_path, meta)
 			values ($1, $2, nullif($3, ''), nullif($4, ''), nullif($5, 'null')::jsonb)
 			returning id,
@@ -436,29 +503,65 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 		return 0, err
 	}
 
-	result, err := s.pool.Exec(ctx, `
-		update weibo_message_attachments
-		   set url = $1,
-		       meta = coalesce(meta, '{}'::jsonb) || $2::jsonb
-		 where attachment_type = 'image'
-		   and coalesce(url, '') = ''
-		   and (
-		         coalesce(meta, '{}'::jsonb) @> $3::jsonb
-		         or coalesce(meta, '{}'::jsonb) @> $4::jsonb
-		       )
+	rows, err := s.pool.Query(ctx, `
+		with updated as (
+		  update weibo_message_attachments
+		     set url = $1,
+		         meta = coalesce(meta, '{}'::jsonb) || $2::jsonb
+		   where attachment_type = 'image'
+		     and coalesce(url, '') = ''
+		     and (
+		           coalesce(meta, '{}'::jsonb) @> $3::jsonb
+		           or coalesce(meta, '{}'::jsonb) @> $4::jsonb
+		     )
+		  returning message_id
+		)
+		select distinct message_id
+		  from updated
 	`, imageURL, string(metaPatchRaw), string(fidFilterRaw), string(taggedURLRaw))
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+
+	var count int64
+	for rows.Next() {
+		var messageID int64
+		if err := rows.Scan(&messageID); err != nil {
+			return 0, err
+		}
+		count++
+		if err := s.NotifyRealtimeEvent(ctx, RealtimeEvent{Type: "message_updated", MessageID: messageID}); err != nil {
+			return 0, err
+		}
+	}
+	return count, rows.Err()
 }
 
 func (s *Store) GetMessageByDedupeKey(ctx context.Context, dedupeKey string) (Message, error) {
-	messages, err := s.queryMessages(ctx, `
-		where m.dedupe_key = $1
+	return getMessageByDedupeKey(ctx, s.pool, dedupeKey)
+}
+
+func getMessageByDedupeKey(ctx context.Context, db messageDB, dedupeKey string) (Message, error) {
+	messages, err := queryMessages(ctx, db, true, `
+			where m.dedupe_key = $1
 		order by m.id desc
 		limit 1
 	`, dedupeKey)
+	if err != nil {
+		return Message{}, err
+	}
+	if len(messages) == 0 {
+		return Message{}, pgx.ErrNoRows
+	}
+	return messages[0], nil
+}
+
+func (s *Store) GetMessageByID(ctx context.Context, id int64, includeRaw bool) (Message, error) {
+	messages, err := queryMessages(ctx, s.pool, includeRaw, `
+		where m.id = $1
+		limit 1
+	`, id)
 	if err != nil {
 		return Message{}, err
 	}
@@ -592,10 +695,14 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		order by coalesce(m.sent_at, m.captured_at) desc, m.id desc
 		limit %s
 	`, addArg(limit))
-	return s.queryMessages(ctx, whereSQL, args...)
+	return queryMessages(ctx, s.pool, params.IncludeRaw, whereSQL, args...)
 }
 
-func (s *Store) queryMessages(ctx context.Context, whereSQL string, args ...any) ([]Message, error) {
+func queryMessages(ctx context.Context, db messageDB, includeRaw bool, whereSQL string, args ...any) ([]Message, error) {
+	rawSelect := "'null'::jsonb"
+	if includeRaw {
+		rawSelect = "coalesce(m.raw, 'null'::jsonb)"
+	}
 	query := fmt.Sprintf(`
 		select m.id,
 		       coalesce(m.weibo_message_id, ''),
@@ -611,14 +718,14 @@ func (s *Store) queryMessages(ctx context.Context, whereSQL string, args ...any)
 		       m.captured_at,
 		       m.source,
 		       m.dedupe_key,
-		       coalesce(m.raw, 'null'::jsonb),
+		       %s,
 		       m.created_at
 		  from weibo_messages m
 		  join weibo_groups g on g.id = m.group_id
 		  left join weibo_users u on u.id = m.sender_id
 		  %s
-	`, whereSQL)
-	rows, err := s.pool.Query(ctx, query, args...)
+	`, rawSelect, whereSQL)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +763,7 @@ func (s *Store) queryMessages(ctx context.Context, whereSQL string, args ...any)
 		return messages, nil
 	}
 
-	attachments, err := s.attachmentsByMessageID(ctx, messageIDs(messages))
+	attachments, err := attachmentsByMessageID(ctx, db, messageIDs(messages))
 	if err != nil {
 		return nil, err
 	}
@@ -666,12 +773,12 @@ func (s *Store) queryMessages(ctx context.Context, whereSQL string, args ...any)
 	return messages, nil
 }
 
-func (s *Store) attachmentsByMessageID(ctx context.Context, ids []int64) (map[int64][]Attachment, error) {
+func attachmentsByMessageID(ctx context.Context, db messageDB, ids []int64) (map[int64][]Attachment, error) {
 	result := make(map[int64][]Attachment)
 	if len(ids) == 0 {
 		return result, nil
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := db.Query(ctx, `
 		select id,
 		       message_id,
 		       attachment_type,
@@ -701,13 +808,35 @@ func (s *Store) attachmentsByMessageID(ctx context.Context, ids []int64) (map[in
 		); err != nil {
 			return nil, err
 		}
+		normalizeImageAttachmentURL(&attachment)
 		result[attachment.MessageID] = append(result[attachment.MessageID], attachment)
 	}
 	return result, rows.Err()
 }
 
-func (s *Store) updateGroupLastMessageAt(ctx context.Context, groupID int64, sentAt *time.Time) error {
-	_, err := s.pool.Exec(ctx, `
+func normalizeImageAttachmentURL(attachment *Attachment) {
+	if attachment == nil || attachment.AttachmentType != "image" || strings.TrimSpace(attachment.URL) != "" {
+		return
+	}
+	var meta struct {
+		FIDs []string `json:"fids"`
+	}
+	if err := json.Unmarshal(attachment.Meta, &meta); err != nil || len(meta.FIDs) == 0 {
+		return
+	}
+	attachment.URL = defaultWeiboThumbnailURL(meta.FIDs[0])
+}
+
+func defaultWeiboThumbnailURL(fid string) string {
+	fid = strings.TrimSpace(fid)
+	if fid == "" {
+		return ""
+	}
+	return "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=" + neturl.QueryEscape(fid) + "&high=240&width=240&size=111,240&source=209678993&imageType=origin"
+}
+
+func updateGroupLastMessageAt(ctx context.Context, db messageDB, groupID int64, sentAt *time.Time) error {
+	_, err := db.Exec(ctx, `
 		update weibo_groups
 		   set last_message_at = greatest(
 		         coalesce(last_message_at, '-infinity'::timestamptz),
@@ -717,6 +846,16 @@ func (s *Store) updateGroupLastMessageAt(ctx context.Context, groupID int64, sen
 		 where id = $1
 	`, groupID, sentAt)
 	return err
+}
+
+func (s *Store) notifyRealtimeBestEffort(ctx context.Context, event RealtimeEvent) {
+	if err := s.NotifyRealtimeEvent(ctx, event); err != nil {
+		slog.Warn("notify realtime event failed after database commit",
+			"type", event.Type,
+			"messageID", event.MessageID,
+			"error", err,
+		)
+	}
 }
 
 func BuildDedupeKey(params CreateMessageParams, groupID int64, senderID int64) string {

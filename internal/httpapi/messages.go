@@ -3,6 +3,8 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,8 +14,12 @@ import (
 )
 
 func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
 	groups, err := s.store.ListGroups(r.Context(), store.ListGroupsParams{
-		Limit: queryInt(r, "limit", 50),
+		Limit: limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -25,9 +31,13 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
 	users, err := s.store.ListUsers(r.Context(), store.ListUsersParams{
 		Query: r.URL.Query().Get("q"),
-		Limit: queryInt(r, "limit", 50),
+		Limit: limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -43,22 +53,41 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	groupID, ok := queryInt64Range(w, r, "groupId", 0, 1)
+	if !ok {
+		return
+	}
+	senderID, ok := queryInt64Range(w, r, "senderId", 0, 1)
+	if !ok {
+		return
+	}
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	includeRaw, ok := parseBoolWithDefault(w, r, "includeRaw", true)
+	if !ok {
+		return
+	}
 
 	messages, err := s.store.ListMessages(r.Context(), store.ListMessagesParams{
-		GroupID:       queryInt64(r, "groupId", 0),
+		GroupID:       groupID,
 		WeiboGroupID:  r.URL.Query().Get("weiboGroupId"),
-		SenderID:      queryInt64(r, "senderId", 0),
+		SenderID:      senderID,
 		WeiboSenderID: r.URL.Query().Get("weiboSenderId"),
 		Query:         r.URL.Query().Get("q"),
 		Before:        before,
-		Limit:         queryInt(r, "limit", 50),
+		Limit:         limit,
+		IncludeRaw:    includeRaw,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	enrichImageAttachmentsFromRaw(messages)
-	stripRawIfRequested(r, messages)
+	if includeRaw {
+		enrichImageAttachmentsFromRaw(messages)
+	}
+	stripRaw(messages, includeRaw)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": messages,
 	})
@@ -75,19 +104,30 @@ func (s *Server) handleListGroupMessages(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	includeRaw, ok := parseBoolWithDefault(w, r, "includeRaw", true)
+	if !ok {
+		return
+	}
 
 	messages, err := s.store.ListMessages(r.Context(), store.ListMessagesParams{
-		GroupID: groupID,
-		Query:   r.URL.Query().Get("q"),
-		Before:  before,
-		Limit:   queryInt(r, "limit", 50),
+		GroupID:    groupID,
+		Query:      r.URL.Query().Get("q"),
+		Before:     before,
+		Limit:      limit,
+		IncludeRaw: includeRaw,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	enrichImageAttachmentsFromRaw(messages)
-	stripRawIfRequested(r, messages)
+	if includeRaw {
+		enrichImageAttachmentsFromRaw(messages)
+	}
+	stripRaw(messages, includeRaw)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": messages,
 	})
@@ -103,7 +143,7 @@ func (s *Server) handleCreateDevMessage(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) createMessage(w http.ResponseWriter, r *http.Request, defaultSource string) {
 	var params store.CreateMessageParams
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+	if err := decodeJSON(w, r, &params); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -127,10 +167,14 @@ func (s *Server) handleListNotificationRules(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
 
 	rules, err := s.store.ListNotificationRules(r.Context(), store.ListNotificationRulesParams{
 		Enabled: enabled,
-		Limit:   queryInt(r, "limit", 50),
+		Limit:   limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -143,7 +187,7 @@ func (s *Server) handleListNotificationRules(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleCreateNotificationRule(w http.ResponseWriter, r *http.Request) {
 	var params store.CreateNotificationRuleParams
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+	if err := decodeJSON(w, r, &params); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -163,7 +207,7 @@ func (s *Server) handleUpdateNotificationRule(w http.ResponseWriter, r *http.Req
 	}
 
 	var params store.UpdateNotificationRuleParams
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+	if err := decodeJSON(w, r, &params); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -177,11 +221,23 @@ func (s *Server) handleUpdateNotificationRule(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleListNotificationEvents(w http.ResponseWriter, r *http.Request) {
+	ruleID, ok := queryInt64Range(w, r, "ruleId", 0, 1)
+	if !ok {
+		return
+	}
+	messageID, ok := queryInt64Range(w, r, "messageId", 0, 1)
+	if !ok {
+		return
+	}
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
 	events, err := s.store.ListNotificationEvents(r.Context(), store.ListNotificationEventsParams{
-		RuleID:    queryInt64(r, "ruleId", 0),
-		MessageID: queryInt64(r, "messageId", 0),
+		RuleID:    ruleID,
+		MessageID: messageID,
 		Status:    r.URL.Query().Get("status"),
-		Limit:     queryInt(r, "limit", 50),
+		Limit:     limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -194,7 +250,7 @@ func (s *Server) handleListNotificationEvents(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleCreateNotificationEvent(w http.ResponseWriter, r *http.Request) {
 	var params store.CreateNotificationEventParams
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+	if err := decodeJSON(w, r, &params); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -206,20 +262,21 @@ func (s *Server) handleCreateNotificationEvent(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, event)
 }
 
-func queryInt(r *http.Request, key string, fallback int) int {
+func queryIntRange(w http.ResponseWriter, r *http.Request, key string, fallback int, min int, max int) (int, bool) {
 	raw := strings.TrimSpace(r.URL.Query().Get(key))
 	if raw == "" {
-		return fallback
+		return fallback, true
 	}
 	value, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
+	if err != nil || value < min || value > max {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%s must be between %d and %d", key, min, max))
+		return 0, false
 	}
-	return value
+	return value, true
 }
 
-func stripRawIfRequested(r *http.Request, messages []store.Message) {
-	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("includeRaw"))) != "false" {
+func stripRaw(messages []store.Message, includeRaw bool) {
+	if includeRaw {
 		return
 	}
 	for index := range messages {
@@ -284,16 +341,46 @@ func imageAttachmentFromRaw(raw json.RawMessage) (store.Attachment, bool) {
 	}, true
 }
 
-func queryInt64(r *http.Request, key string, fallback int64) int64 {
+func queryInt64Range(w http.ResponseWriter, r *http.Request, key string, fallback int64, min int64) (int64, bool) {
 	raw := strings.TrimSpace(r.URL.Query().Get(key))
 	if raw == "" {
-		return fallback
+		return fallback, true
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value < 0 {
-		return fallback
+	if err != nil || value < min {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%s must be an integer greater than or equal to %d", key, min))
+		return 0, false
 	}
-	return value
+	return value, true
+}
+
+func parseBoolWithDefault(w http.ResponseWriter, r *http.Request, key string, fallback bool) (bool, bool) {
+	value, ok := parseOptionalBool(w, r, key)
+	if !ok {
+		return false, false
+	}
+	if value == nil {
+		return fallback, true
+	}
+	return *value, true
+}
+
+const maxJSONBodyBytes = 1 << 20
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain a single JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func parseOptionalTime(w http.ResponseWriter, r *http.Request, key string) (*time.Time, bool) {

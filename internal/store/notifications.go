@@ -13,7 +13,10 @@ type NotificationRule struct {
 	ID             int64     `json:"id"`
 	Name           string    `json:"name"`
 	GroupID        *int64    `json:"groupId,omitempty"`
+	WeiboGroupID   string    `json:"weiboGroupId,omitempty"`
+	GroupName      string    `json:"groupName,omitempty"`
 	SenderID       *int64    `json:"senderId,omitempty"`
+	WeiboSenderID  string    `json:"weiboSenderId,omitempty"`
 	SenderNickname string    `json:"senderNickname,omitempty"`
 	MessageType    string    `json:"messageType,omitempty"`
 	Enabled        bool      `json:"enabled"`
@@ -24,7 +27,10 @@ type NotificationRule struct {
 type CreateNotificationRuleParams struct {
 	Name           string `json:"name"`
 	GroupID        *int64 `json:"groupId"`
+	WeiboGroupID   string `json:"weiboGroupId"`
+	GroupName      string `json:"groupName"`
 	SenderID       *int64 `json:"senderId"`
+	WeiboSenderID  string `json:"weiboSenderId"`
 	SenderNickname string `json:"senderNickname"`
 	MessageType    string `json:"messageType"`
 	Enabled        *bool  `json:"enabled"`
@@ -34,7 +40,10 @@ type UpdateNotificationRuleParams struct {
 	ID             int64  `json:"-"`
 	Name           string `json:"name"`
 	GroupID        *int64 `json:"groupId"`
+	WeiboGroupID   string `json:"weiboGroupId"`
+	GroupName      string `json:"groupName"`
 	SenderID       *int64 `json:"senderId"`
+	WeiboSenderID  string `json:"weiboSenderId"`
 	SenderNickname string `json:"senderNickname"`
 	MessageType    string `json:"messageType"`
 	Enabled        *bool  `json:"enabled"`
@@ -43,6 +52,13 @@ type UpdateNotificationRuleParams struct {
 type ListNotificationRulesParams struct {
 	Enabled *bool
 	Limit   int
+}
+
+type EnvironmentNotificationRuleParams struct {
+	WeiboGroupID  string
+	GroupName     string
+	WeiboSenderID string
+	SenderName    string
 }
 
 type NotificationEvent struct {
@@ -81,6 +97,9 @@ func (s *Store) CreateNotificationRule(ctx context.Context, params CreateNotific
 	if name == "" {
 		return NotificationRule{}, errors.New("rule name is required")
 	}
+	if !hasNotificationRuleCondition(params.GroupID, params.WeiboGroupID, params.GroupName, params.SenderID, params.WeiboSenderID, params.SenderNickname, params.MessageType) {
+		return NotificationRule{}, errors.New("notification rule requires at least one matching condition")
+	}
 	enabled := true
 	if params.Enabled != nil {
 		enabled = *params.Enabled
@@ -88,24 +107,31 @@ func (s *Store) CreateNotificationRule(ctx context.Context, params CreateNotific
 
 	var rule NotificationRule
 	err := s.pool.QueryRow(ctx, `
-		insert into notification_rules (
-		  name, group_id, sender_id, sender_nickname, message_type, enabled
-		)
-		values ($1, $2, $3, nullif($4, ''), nullif($5, ''), $6)
-		returning id,
-		          name,
-		          group_id,
-		          sender_id,
-		          coalesce(sender_nickname, ''),
+			insert into notification_rules (
+			  name, group_id, weibo_group_id, group_name, sender_id, weibo_sender_id,
+			  sender_nickname, message_type, enabled
+			)
+			values ($1, $2, nullif($3, ''), nullif($4, ''), $5, nullif($6, ''), nullif($7, ''), nullif($8, ''), $9)
+			returning id,
+			          name,
+			          group_id,
+			          coalesce(weibo_group_id, ''),
+			          coalesce(group_name, ''),
+			          sender_id,
+			          coalesce(weibo_sender_id, ''),
+			          coalesce(sender_nickname, ''),
 		          coalesce(message_type, ''),
 		          enabled,
 		          created_at,
 		          updated_at
-	`, name, params.GroupID, params.SenderID, strings.TrimSpace(params.SenderNickname), strings.TrimSpace(params.MessageType), enabled).Scan(
+		`, name, params.GroupID, strings.TrimSpace(params.WeiboGroupID), strings.TrimSpace(params.GroupName), params.SenderID, strings.TrimSpace(params.WeiboSenderID), strings.TrimSpace(params.SenderNickname), strings.TrimSpace(params.MessageType), enabled).Scan(
 		&rule.ID,
 		&rule.Name,
 		&rule.GroupID,
+		&rule.WeiboGroupID,
+		&rule.GroupName,
 		&rule.SenderID,
+		&rule.WeiboSenderID,
 		&rule.SenderNickname,
 		&rule.MessageType,
 		&rule.Enabled,
@@ -123,6 +149,9 @@ func (s *Store) UpdateNotificationRule(ctx context.Context, params UpdateNotific
 	if name == "" {
 		return NotificationRule{}, errors.New("rule name is required")
 	}
+	if !hasNotificationRuleCondition(params.GroupID, params.WeiboGroupID, params.GroupName, params.SenderID, params.WeiboSenderID, params.SenderNickname, params.MessageType) {
+		return NotificationRule{}, errors.New("notification rule requires at least one matching condition")
+	}
 	enabled := true
 	if params.Enabled != nil {
 		enabled = *params.Enabled
@@ -133,26 +162,35 @@ func (s *Store) UpdateNotificationRule(ctx context.Context, params UpdateNotific
 		update notification_rules
 		   set name = $2,
 		       group_id = $3,
-		       sender_id = $4,
-		       sender_nickname = nullif($5, ''),
-		       message_type = nullif($6, ''),
-		       enabled = $7,
+		       weibo_group_id = nullif($4, ''),
+		       group_name = nullif($5, ''),
+		       sender_id = $6,
+		       weibo_sender_id = nullif($7, ''),
+		       sender_nickname = nullif($8, ''),
+		       message_type = nullif($9, ''),
+		       enabled = $10,
 		       updated_at = now()
 		 where id = $1
 		returning id,
 		          name,
 		          group_id,
+		          coalesce(weibo_group_id, ''),
+		          coalesce(group_name, ''),
 		          sender_id,
+		          coalesce(weibo_sender_id, ''),
 		          coalesce(sender_nickname, ''),
 		          coalesce(message_type, ''),
 		          enabled,
 		          created_at,
 		          updated_at
-	`, params.ID, name, params.GroupID, params.SenderID, strings.TrimSpace(params.SenderNickname), strings.TrimSpace(params.MessageType), enabled).Scan(
+	`, params.ID, name, params.GroupID, strings.TrimSpace(params.WeiboGroupID), strings.TrimSpace(params.GroupName), params.SenderID, strings.TrimSpace(params.WeiboSenderID), strings.TrimSpace(params.SenderNickname), strings.TrimSpace(params.MessageType), enabled).Scan(
 		&rule.ID,
 		&rule.Name,
 		&rule.GroupID,
+		&rule.WeiboGroupID,
+		&rule.GroupName,
 		&rule.SenderID,
+		&rule.WeiboSenderID,
 		&rule.SenderNickname,
 		&rule.MessageType,
 		&rule.Enabled,
@@ -160,6 +198,16 @@ func (s *Store) UpdateNotificationRule(ctx context.Context, params UpdateNotific
 		&rule.UpdatedAt,
 	)
 	return rule, err
+}
+
+func hasNotificationRuleCondition(groupID *int64, weiboGroupID string, groupName string, senderID *int64, weiboSenderID string, senderNickname string, messageType string) bool {
+	return groupID != nil ||
+		strings.TrimSpace(weiboGroupID) != "" ||
+		strings.TrimSpace(groupName) != "" ||
+		senderID != nil ||
+		strings.TrimSpace(weiboSenderID) != "" ||
+		strings.TrimSpace(senderNickname) != "" ||
+		strings.TrimSpace(messageType) != ""
 }
 
 func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificationRulesParams) ([]NotificationRule, error) {
@@ -175,7 +223,10 @@ func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificati
 		select id,
 		       name,
 		       group_id,
+		       coalesce(weibo_group_id, ''),
+		       coalesce(group_name, ''),
 		       sender_id,
+		       coalesce(weibo_sender_id, ''),
 		       coalesce(sender_nickname, ''),
 		       coalesce(message_type, ''),
 		       enabled,
@@ -198,7 +249,10 @@ func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificati
 			&rule.ID,
 			&rule.Name,
 			&rule.GroupID,
+			&rule.WeiboGroupID,
+			&rule.GroupName,
 			&rule.SenderID,
+			&rule.WeiboSenderID,
 			&rule.SenderNickname,
 			&rule.MessageType,
 			&rule.Enabled,
@@ -210,6 +264,91 @@ func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificati
 		rules = append(rules, rule)
 	}
 	return rules, rows.Err()
+}
+
+func (s *Store) SyncEnvironmentNotificationRule(ctx context.Context, params EnvironmentNotificationRuleParams) (NotificationRule, error) {
+	const ruleName = "环境变量默认通知规则"
+	weiboGroupID := strings.TrimSpace(params.WeiboGroupID)
+	groupName := ""
+	if weiboGroupID == "" {
+		groupName = strings.TrimSpace(params.GroupName)
+	}
+	weiboSenderID := strings.TrimSpace(params.WeiboSenderID)
+	senderName := ""
+	if weiboSenderID == "" {
+		senderName = strings.TrimSpace(params.SenderName)
+	}
+	enabled := weiboSenderID != "" || senderName != ""
+
+	var rule NotificationRule
+	err := s.pool.QueryRow(ctx, `
+		insert into notification_rules (
+		  name, weibo_group_id, group_name, weibo_sender_id, sender_nickname, enabled
+		)
+		values ($1, nullif($2, ''), nullif($3, ''), nullif($4, ''), nullif($5, ''), $6)
+		on conflict (name) where name = '环境变量默认通知规则' do update set
+		  weibo_group_id = excluded.weibo_group_id,
+		  group_name = excluded.group_name,
+		  weibo_sender_id = excluded.weibo_sender_id,
+		  sender_nickname = excluded.sender_nickname,
+		  enabled = excluded.enabled,
+		  updated_at = now()
+		returning id,
+		          name,
+		          group_id,
+		          coalesce(weibo_group_id, ''),
+		          coalesce(group_name, ''),
+		          sender_id,
+		          coalesce(weibo_sender_id, ''),
+		          coalesce(sender_nickname, ''),
+		          coalesce(message_type, ''),
+		          enabled,
+		          created_at,
+		          updated_at
+	`, ruleName, weiboGroupID, groupName, weiboSenderID, senderName, enabled).Scan(
+		&rule.ID,
+		&rule.Name,
+		&rule.GroupID,
+		&rule.WeiboGroupID,
+		&rule.GroupName,
+		&rule.SenderID,
+		&rule.WeiboSenderID,
+		&rule.SenderNickname,
+		&rule.MessageType,
+		&rule.Enabled,
+		&rule.CreatedAt,
+		&rule.UpdatedAt,
+	)
+	return rule, err
+}
+
+func matchingNotificationRuleIDs(ctx context.Context, db messageDB, group Group, user User, messageType string) ([]int64, error) {
+	rows, err := db.Query(ctx, `
+		select id
+		  from notification_rules
+		 where enabled = true
+		   and (group_id is null or group_id = $1)
+		   and (weibo_group_id is null or weibo_group_id = nullif($2, ''))
+		   and (group_name is null or group_name = $3)
+		   and (sender_id is null or sender_id = $4)
+		   and (weibo_sender_id is null or weibo_sender_id = nullif($5, ''))
+		   and (sender_nickname is null or sender_nickname = $6)
+		   and (message_type is null or message_type = $7)
+		 order by id asc
+	`, group.ID, group.WeiboGroupID, group.Name, user.ID, user.WeiboUserID, user.Nickname, strings.TrimSpace(messageType))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) CreateNotificationEvent(ctx context.Context, params CreateNotificationEventParams) (NotificationEvent, error) {
@@ -241,6 +380,39 @@ func (s *Store) CreateNotificationEvent(ctx context.Context, params CreateNotifi
 		          coalesce(error_message, ''),
 		          created_at
 	`, params.RuleID, params.MessageID, strings.TrimSpace(params.Status), params.RelayURL, params.ToUser, jsonOrNull(params.RequestPayload), jsonOrNull(params.ResponsePayload), params.ErrorMessage).Scan(
+		&event.ID,
+		&event.RuleID,
+		&event.MessageID,
+		&event.Status,
+		&event.RelayURL,
+		&event.ToUser,
+		&event.RequestPayload,
+		&event.ResponsePayload,
+		&event.ErrorMessage,
+		&event.CreatedAt,
+	)
+	if err != nil {
+		return event, err
+	}
+	return event, s.NotifyRealtimeEvent(ctx, RealtimeEvent{Type: "notification_event_created", NotificationEventID: event.ID})
+}
+
+func (s *Store) GetNotificationEventByID(ctx context.Context, id int64) (NotificationEvent, error) {
+	var event NotificationEvent
+	err := s.pool.QueryRow(ctx, `
+		select id,
+		       rule_id,
+		       message_id,
+		       status,
+		       coalesce(relay_url, ''),
+		       coalesce(touser, ''),
+		       coalesce(request_payload, 'null'::jsonb),
+		       coalesce(response_payload, 'null'::jsonb),
+		       coalesce(error_message, ''),
+		       created_at
+		  from notification_events
+		 where id = $1
+	`, id).Scan(
 		&event.ID,
 		&event.RuleID,
 		&event.MessageID,

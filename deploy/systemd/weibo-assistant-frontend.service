@@ -1,0 +1,22 @@
+[Unit]
+Description=weibo-assistant frontend static server
+Wants=network-online.target
+After=network-online.target weibo-assistant-server.service
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=__APP_DIR__
+Environment=APP_ENV=production
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=__APP_DIR__/bin/weibo-assistant frontend
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
