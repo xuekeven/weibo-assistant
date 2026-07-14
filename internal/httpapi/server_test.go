@@ -45,6 +45,10 @@ func TestStrictRequestValidation(t *testing.T) {
 		{name: "invalid limit", method: http.MethodGet, path: "/api/groups?limit=abc"},
 		{name: "limit too large", method: http.MethodGet, path: "/api/groups?limit=201"},
 		{name: "invalid boolean", method: http.MethodGet, path: "/api/messages?includeRaw=maybe"},
+		{name: "invalid since time", method: http.MethodGet, path: "/api/messages?since=yesterday"},
+		{name: "invalid delete rule id", method: http.MethodDelete, path: "/api/notification-rules/not-a-number"},
+		{name: "invalid retry job id", method: http.MethodPost, path: "/api/notification-outbox/not-a-number/retry"},
+		{name: "invalid message detail id", method: http.MethodGet, path: "/api/messages/not-a-number"},
 		{name: "unknown json field", method: http.MethodPost, path: "/api/dev/messages", body: `{"unknown":true}`},
 		{name: "multiple json values", method: http.MethodPost, path: "/api/dev/messages", body: `{} {}`},
 	}

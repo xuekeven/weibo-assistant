@@ -95,6 +95,9 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 	}
 
 	message := messages[0]
+	if message.WeiboMessageID != "5318460893568964" {
+		t.Fatalf("expected current_version fallback, got %q", message.WeiboMessageID)
+	}
 	if message.MessageType != "image" {
 		t.Fatalf("expected image message type, got %q", message.MessageType)
 	}
@@ -119,6 +122,116 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 	}
 	if meta.URLStatus != "" {
 		t.Fatalf("unexpected url status: %q", meta.URLStatus)
+	}
+}
+
+func TestParseNetworkMessagesUsesStableIDAcrossVersionChanges(t *testing.T) {
+	payload := `[
+		{
+			"data": {
+				"type": "groupchat",
+				"sub_type": 321,
+				"info": {
+					"id": 5320231658456624,
+					"gid": 4761715839862414,
+					"content": "不过这周应该能跌个差不多",
+					"from_uid": 1401527553,
+					"current_version": 5320231658456966
+				}
+			}
+		},
+		{
+			"data": {
+				"type": "groupchat",
+				"sub_type": 321,
+				"info": {
+					"id": 5320231658456624,
+					"gid": 4761715839862414,
+					"content": "不过这周应该能跌个差不多",
+					"from_uid": 1401527553,
+					"current_version": 5320231658456970
+				}
+			}
+		}
+	]`
+
+	messages := parseNetworkMessages(payload)
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 delivery events, got %d", len(messages))
+	}
+	for _, message := range messages {
+		if message.WeiboMessageID != "5320231658456624" {
+			t.Fatalf("expected stable info.id, got %q", message.WeiboMessageID)
+		}
+		if message.DedupeKey != "weibo_message:5320231658456624" {
+			t.Fatalf("unexpected dedupe key %q", message.DedupeKey)
+		}
+	}
+}
+
+func TestParseNetworkMessagesMemberLevelUpgrade(t *testing.T) {
+	payload := `[
+		{
+			"data": {
+				"type": "groupchat",
+				"sub_type": 101,
+				"info": {
+					"template": "恭喜 {{user.DATA}} 升级至{{level.DATA}}",
+					"gid": 4761715839862414,
+					"data": {
+						"level": {"value": "LV6 建筑大佬"},
+						"user": {"value": "宁愿坐在自行车上笑ZJU"}
+					},
+					"type": 321,
+					"from_uid": 5394206608,
+					"content": "恭喜 宁愿坐在自行车上笑ZJU 升级至LV6 建筑大佬",
+					"from_user": {"screen_name": "粉丝群"},
+					"sub_type": 101,
+					"id": 5320374565997228,
+					"time": 1783959607
+				}
+			}
+		}
+	]`
+	if !looksLikeMessagePayload(payload) {
+		t.Fatal("system groupchat payload must reach the parser")
+	}
+
+	messages := parseNetworkMessages(payload)
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 system message, got %d", len(messages))
+	}
+	message := messages[0]
+	if message.MessageType != "system" {
+		t.Fatalf("message type = %q, want system", message.MessageType)
+	}
+	if message.WeiboMessageID != "5320374565997228" {
+		t.Fatalf("message id = %q", message.WeiboMessageID)
+	}
+	if message.SenderID != "5394206608" || message.SenderName != "粉丝群" {
+		t.Fatalf("unexpected sender: %s %s", message.SenderID, message.SenderName)
+	}
+	if message.SentAt == nil || message.SentAt.Unix() != 1783959607 {
+		t.Fatalf("unexpected sent time: %v", message.SentAt)
+	}
+}
+
+func TestParseNetworkMessagesKeepsUnknownGroupChatType(t *testing.T) {
+	payload := `[{"data":{"type":"groupchat","sub_type":909,"info":{"gid":4761715839862414,"sub_type":909}}}]`
+
+	messages := parseNetworkMessages(payload)
+	if len(messages) != 1 {
+		t.Fatalf("expected unknown groupchat event to be retained, got %d", len(messages))
+	}
+	message := messages[0]
+	if message.Content != "" {
+		t.Fatalf("archive-only event must not get display content: %q", message.Content)
+	}
+	if message.MessageType != "event" {
+		t.Fatalf("fallback event type = %q, want event", message.MessageType)
+	}
+	if message.WeiboMessageID == "" || message.SenderID != "weibo-system:909" {
+		t.Fatalf("missing fallback identifiers: %#v", message)
 	}
 }
 

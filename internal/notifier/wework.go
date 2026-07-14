@@ -55,6 +55,10 @@ func (c *WeworkClient) Probe(ctx context.Context) error {
 }
 
 func (c *WeworkClient) SendText(ctx context.Context, content string) (SendResponse, error) {
+	return c.SendTextWithIdempotency(ctx, content, "")
+}
+
+func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content string, idempotencyKey string) (SendResponse, error) {
 	payload := map[string]string{"content": content}
 	if c.toUser != "" {
 		payload["touser"] = c.toUser
@@ -69,6 +73,9 @@ func (c *WeworkClient) SendText(ctx context.Context, content string) (SendRespon
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	return c.doSend(req)
 }
 

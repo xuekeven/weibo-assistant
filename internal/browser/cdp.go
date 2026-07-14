@@ -132,6 +132,14 @@ func (c *cdpClient) Close() error {
 }
 
 func (c *cdpClient) evaluate(ctx context.Context, expression string, value any) error {
+	return c.evaluateWithOptions(ctx, expression, false, value)
+}
+
+func (c *cdpClient) evaluatePromise(ctx context.Context, expression string, value any) error {
+	return c.evaluateWithOptions(ctx, expression, true, value)
+}
+
+func (c *cdpClient) evaluateWithOptions(ctx context.Context, expression string, awaitPromise bool, value any) error {
 	var result struct {
 		Result struct {
 			Value json.RawMessage `json:"value"`
@@ -141,7 +149,7 @@ func (c *cdpClient) evaluate(ctx context.Context, expression string, value any) 
 	if err := c.call(ctx, "Runtime.evaluate", map[string]any{
 		"expression":            expression,
 		"returnByValue":         true,
-		"awaitPromise":          false,
+		"awaitPromise":          awaitPromise,
 		"includeCommandLineAPI": false,
 	}, &result); err != nil {
 		return err

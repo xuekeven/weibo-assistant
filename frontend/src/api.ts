@@ -8,6 +8,15 @@ export type Group = {
   name: string
   avatarUrl?: string
   lastMessageAt?: string
+  lastMessagePreview?: string
+  updatedAt: string
+}
+
+export type User = {
+  id: number
+  weiboUserId?: string
+  nickname: string
+  avatarUrl?: string
   updatedAt: string
 }
 
@@ -28,6 +37,7 @@ export type Message = {
   dedupeKey: string
   attachments?: Attachment[]
   createdAt: string
+  raw?: Record<string, unknown> | null
 }
 
 export type Attachment = {
@@ -52,14 +62,64 @@ export type MonitorStatus = {
   staleAfterSecs?: number
 }
 
+export type HistorySyncJob = {
+  id: number
+  groupId: number
+  weiboGroupId: string
+  groupName: string
+  mode: 'startup' | 'recovery' | 'manual'
+  requestedFrom?: string
+  requestedTo?: string
+  cursorMid?: string
+  stopMid?: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  maxPages: number
+  pagesFetched: number
+  messagesSeen: number
+  messagesInserted: number
+  stopReason?: string
+  lastError?: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type NotificationEvent = {
   id: number
   messageId: number
   status: string
   relayUrl?: string
-  touser?: string
+  touser: string
   errorMessage?: string
   createdAt: string
+}
+
+export type NotificationRule = {
+  id: number
+  name: string
+  weiboGroupId?: string
+  groupName?: string
+  weiboSenderId?: string
+  senderNickname?: string
+  messageType?: string
+  enabled: boolean
+  hitCount: number
+  finalFailureCount: number
+  lastMatchedAt?: string
+}
+
+export type NotificationOutboxItem = {
+  id: number
+  ruleId?: number
+  messageId: number
+  content: string
+  touser?: string
+  status: string
+  attemptCount: number
+  maxAttempts: number
+  nextAttemptAt: string
+  lastError?: string
+  sentAt?: string
+  updatedAt: string
 }
 
 export type RealtimeEvent = {
@@ -67,6 +127,7 @@ export type RealtimeEvent = {
   message?: Message
   monitorStatus?: MonitorStatus
   notificationEvent?: NotificationEvent
+  historySyncJob?: HistorySyncJob
   sentAt?: string
 }
 
@@ -74,17 +135,27 @@ type ListResponse<T> = {
   items: T[] | null
 }
 
-async function request<T>(path: string): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 8000)
   try {
     const response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: init.body ? { 'Content-Type': 'application/json', ...init.headers } : init.headers,
       signal: controller.signal
     })
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(text || `HTTP ${response.status}`)
+      let message = text
+      try {
+        const parsed = JSON.parse(text) as { error?: string }
+        message = parsed.error || text
+      } catch {
+        // 非 JSON 错误响应直接展示原始文本。
+      }
+      throw new Error(message || `请求失败（HTTP ${response.status}）`)
     }
+    if (response.status === 204) return undefined as T
     return response.json() as Promise<T>
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
@@ -104,7 +175,10 @@ export function listMessages(params: {
   groupId?: number
   weiboGroupId?: string
   weiboSenderId?: string
+  messageType?: string
   q?: string
+  since?: string
+  before?: string
   limit?: number
 }) {
   const query = new URLSearchParams()
@@ -113,16 +187,68 @@ export function listMessages(params: {
   if (params.groupId) query.set('groupId', String(params.groupId))
   if (params.weiboGroupId) query.set('weiboGroupId', params.weiboGroupId)
   if (params.weiboSenderId) query.set('weiboSenderId', params.weiboSenderId)
+  if (params.messageType) query.set('messageType', params.messageType)
   if (params.q) query.set('q', params.q)
+  if (params.since) query.set('since', params.since)
+  if (params.before) query.set('before', params.before)
   return request<ListResponse<Message>>(`/api/messages?${query.toString()}`)
+}
+
+export function getMessage(id: number, includeRaw = false) {
+  return request<Message>(`/api/messages/${id}?includeRaw=${includeRaw}`)
+}
+
+export function listUsers(q = '', limit = 200) {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (q.trim()) query.set('q', q.trim())
+  return request<ListResponse<User>>(`/api/users?${query.toString()}`)
 }
 
 export function getMonitorStatus() {
   return request<MonitorStatus>('/api/monitor/status')
 }
 
+export function getHistorySync(groupId: number) {
+  return request<{ job: HistorySyncJob | null }>(`/api/groups/${groupId}/history-sync`)
+}
+
+export function createHistorySync(groupId: number, payload: { from?: string; to?: string; pages?: number }) {
+  return request<HistorySyncJob>(`/api/groups/${groupId}/history-sync`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })
+}
+
 export function listNotificationEvents(limit = 30) {
   return request<ListResponse<NotificationEvent>>(`/api/notification-events?limit=${limit}`)
+}
+
+export function listNotificationRules(limit = 100) {
+  return request<ListResponse<NotificationRule>>(`/api/notification-rules?limit=${limit}`)
+}
+
+export function createNotificationRule(payload: Record<string, unknown>) {
+  return request<NotificationRule>('/api/notification-rules', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function updateNotificationRule(id: number, payload: Record<string, unknown>) {
+  return request<NotificationRule>(`/api/notification-rules/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })
+}
+
+export function deleteNotificationRule(id: number) {
+  return request<void>(`/api/notification-rules/${id}`, { method: 'DELETE' })
+}
+
+export function listNotificationOutbox(limit = 100) {
+  return request<ListResponse<NotificationOutboxItem>>(`/api/notification-outbox?limit=${limit}`)
+}
+
+export function retryNotificationOutbox(id: number) {
+  return request<{ status: string }>(`/api/notification-outbox/${id}/retry`, { method: 'POST' })
+}
+
+export function getReadiness() {
+  return request<Record<string, unknown>>('/readyz')
 }
 
 export function createRealtimeSocket() {

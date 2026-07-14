@@ -38,6 +38,8 @@ type MonitorOptions struct {
 	OnImageReference    func(context.Context, NetworkImageReference) error
 	OnBrowserState      func(bool)
 	OnCDPState          func(connected bool, reconnected bool)
+	OnPageTarget        func(webSocketDebuggerURL string)
+	OnWebSocketState    func(connected bool, reconnected bool)
 	OnMessagesParsed    func(int)
 	OnTrackedRequests   func(int)
 }
@@ -185,6 +187,9 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			stopProcess(cmd)
 			return selectErr
 		}
+		if opts.OnPageTarget != nil {
+			opts.OnPageTarget(target.WebSocketDebuggerURL)
+		}
 	}
 	slog.Info("monitor heartbeat", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error)
 	if opts.OnProbe != nil {
@@ -247,7 +252,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			opts.OnCDPState(true, generation > 1)
 		}
 		go func() {
-			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests)
+			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests, opts.OnWebSocketState)
 			select {
 			case networkErrCh <- networkMonitorResult{generation: generation, err: err}:
 			case <-ctx.Done():
@@ -312,6 +317,9 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				}
 				if selectErr == nil {
 					probe.Status = "network_listening"
+					if opts.OnPageTarget != nil {
+						opts.OnPageTarget(currentTarget.WebSocketDebuggerURL)
+					}
 				}
 			}
 			slog.Info("monitor heartbeat", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error)
@@ -361,6 +369,9 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				"url", target.URL,
 			)
 			startNetworkMonitor(target.WebSocketDebuggerURL)
+			if opts.OnPageTarget != nil {
+				opts.OnPageTarget(target.WebSocketDebuggerURL)
+			}
 		case <-reloadC:
 			slog.Info("page reload interval reached; reloading current chat page", "url", target.URL)
 			if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
@@ -714,6 +725,7 @@ func monitorNetworkEvents(
 	onImageReference func(context.Context, NetworkImageReference) error,
 	onMessagesParsed func(int),
 	onTrackedRequests func(int),
+	onWebSocketState func(connected bool, reconnected bool),
 ) error {
 	if strings.TrimSpace(webSocketDebuggerURL) == "" {
 		return errors.New("websocket debugger URL is required")
@@ -734,6 +746,8 @@ func monitorNetworkEvents(
 	slog.Info("network monitor enabled")
 
 	requests := make(map[string]networkRequestInfo)
+	activeWebSockets := make(map[string]struct{})
+	hadWebSocket := false
 	for {
 		envelope, err := client.readEnvelope(ctx)
 		if err != nil {
@@ -770,11 +784,17 @@ func monitorNetworkEvents(
 				URL       string `json:"url"`
 			}
 			if json.Unmarshal(envelope.Params, &params) == nil {
+				wasDisconnected := hadWebSocket && len(activeWebSockets) == 0
+				activeWebSockets[params.RequestID] = struct{}{}
+				hadWebSocket = true
 				rememberNetworkRequest(requests, params.RequestID, networkRequestInfo{URL: params.URL, RequestURL: params.URL, ResourceType: "WebSocket"}, maxTrackedNetworkRequests)
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
 				slog.Info("network websocket created", "requestID", params.RequestID, "url", params.URL)
+				if onWebSocketState != nil && len(activeWebSockets) == 1 {
+					onWebSocketState(true, wasDisconnected)
+				}
 			}
 		case "Network.webSocketClosed":
 			var params struct {
@@ -783,10 +803,14 @@ func monitorNetworkEvents(
 			if json.Unmarshal(envelope.Params, &params) == nil {
 				info := requests[params.RequestID]
 				delete(requests, params.RequestID)
+				delete(activeWebSockets, params.RequestID)
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
 				slog.Info("network websocket closed", "requestID", params.RequestID, "url", info.URL)
+				if onWebSocketState != nil && hadWebSocket && len(activeWebSockets) == 0 {
+					onWebSocketState(false, false)
+				}
 			}
 		case "Network.webSocketFrameReceived":
 			var params struct {
@@ -816,17 +840,17 @@ func monitorNetworkEvents(
 						"contentSHA256", contentLogHash(message.Content),
 					)
 					slog.Debug("network recall content", "content", clipLogText(message.Content, 240))
-					continue
+				} else {
+					slog.Info("network message parsed",
+						"weiboMessageID", message.WeiboMessageID,
+						"groupID", message.GroupID,
+						"senderID", message.SenderID,
+						"type", message.MessageType,
+						"contentLength", len([]rune(message.Content)),
+						"contentSHA256", contentLogHash(message.Content),
+					)
+					slog.Debug("network message content", "weiboMessageID", message.WeiboMessageID, "content", clipLogText(message.Content, 240))
 				}
-				slog.Info("network message parsed",
-					"weiboMessageID", message.WeiboMessageID,
-					"groupID", message.GroupID,
-					"senderID", message.SenderID,
-					"type", message.MessageType,
-					"contentLength", len([]rune(message.Content)),
-					"contentSHA256", contentLogHash(message.Content),
-				)
-				slog.Debug("network message content", "weiboMessageID", message.WeiboMessageID, "content", clipLogText(message.Content, 240))
 				if onMessage != nil {
 					if err := onMessage(ctx, message); err != nil {
 						slog.Warn("persist network message failed",
@@ -1310,17 +1334,18 @@ func parseNetworkMessageEvent(rawEvent json.RawMessage) (NetworkMessage, bool) {
 	}
 
 	switch event.Data.SubType {
-	case 321:
-		return parseGroupChatTextMessage(rawEvent, event.Data.Info)
 	case 331:
-		return parseGroupChatRecallMessage(rawEvent, event.Data.Info)
+		if message, ok := parseGroupChatRecallMessage(rawEvent, event.Data.Info); ok {
+			return message, true
+		}
 	default:
-		return NetworkMessage{}, false
 	}
+	return parseGroupChatMessage(rawEvent, event.Data.Info, event.Data.SubType)
 }
 
-func parseGroupChatTextMessage(rawEvent json.RawMessage, rawInfo json.RawMessage) (NetworkMessage, bool) {
+func parseGroupChatMessage(rawEvent json.RawMessage, rawInfo json.RawMessage, eventSubType int) (NetworkMessage, bool) {
 	var info struct {
+		ID             json.Number   `json:"id"`
 		GID            json.Number   `json:"gid"`
 		GroupName      string        `json:"group_name"`
 		Content        string        `json:"content"`
@@ -1330,7 +1355,12 @@ func parseGroupChatTextMessage(rawEvent json.RawMessage, rawInfo json.RawMessage
 		MediaType      int           `json:"media_type"`
 		Type           int           `json:"type"`
 		SubType        int           `json:"sub_type"`
-		Annotations    struct {
+		Template       string        `json:"template"`
+		Time           int64         `json:"time"`
+		Data           map[string]struct {
+			Value string `json:"value"`
+		} `json:"data"`
+		Annotations struct {
 			PushProcExt struct {
 				SendTime int64 `json:"send_time"`
 			} `json:"push_proc_ext"`
@@ -1347,9 +1377,26 @@ func parseGroupChatTextMessage(rawEvent json.RawMessage, rawInfo json.RawMessage
 
 	groupID := info.GID.String()
 	senderID := info.FromUID.String()
-	weiboMessageID := info.CurrentVersion.String()
+	weiboMessageID := info.ID.String()
+	if weiboMessageID == "" || weiboMessageID == "0" {
+		weiboMessageID = info.CurrentVersion.String()
+	}
+	effectiveSubType := info.SubType
+	if effectiveSubType == 0 {
+		effectiveSubType = eventSubType
+	}
+	if senderID == "" || senderID == "0" {
+		senderID = fmt.Sprintf("weibo-system:%d", effectiveSubType)
+	}
+	if weiboMessageID == "" || weiboMessageID == "0" {
+		weiboMessageID = fmt.Sprintf("event:%x", sha256.Sum256(rawEvent))
+	}
+	attachments := imageAttachmentsFromInfo(rawInfo, info.MediaType, info.FIDs)
 	content := strings.TrimSpace(info.Content)
-	if groupID == "" || senderID == "" || weiboMessageID == "" || content == "" {
+	if content == "" {
+		content = renderMessageTemplate(info.Template, info.Data)
+	}
+	if groupID == "" || groupID == "0" {
 		return NetworkMessage{}, false
 	}
 
@@ -1357,20 +1404,31 @@ func parseGroupChatTextMessage(rawEvent json.RawMessage, rawInfo json.RawMessage
 	if info.Annotations.PushProcExt.SendTime > 0 {
 		value := time.UnixMilli(info.Annotations.PushProcExt.SendTime)
 		sentAt = &value
+	} else if info.Time > 0 {
+		value := time.Unix(info.Time, 0)
+		sentAt = &value
 	}
 	avatar := info.FromUser.ProfileImageURL
 	if avatar == "" {
 		avatar = info.FromUser.AvatarLarge
 	}
-	attachments := imageAttachmentsFromInfo(rawInfo, info.MediaType, info.FIDs)
 	messageType := messageTypeFromGroupChatInfo(info.Type, info.MediaType, len(attachments), "text")
+	if content == "" && len(attachments) == 0 {
+		messageType = "event"
+	} else if strings.TrimSpace(info.Template) != "" || effectiveSubType == 101 {
+		messageType = "system"
+	}
+	senderName := strings.TrimSpace(info.FromUser.ScreenName)
+	if senderName == "" && strings.HasPrefix(senderID, "weibo-system:") {
+		senderName = "微博系统消息"
+	}
 
 	return NetworkMessage{
 		WeiboMessageID: weiboMessageID,
 		GroupID:        groupID,
 		GroupName:      strings.TrimSpace(info.GroupName),
 		SenderID:       senderID,
-		SenderName:     strings.TrimSpace(info.FromUser.ScreenName),
+		SenderName:     senderName,
 		SenderAvatar:   strings.TrimSpace(avatar),
 		MessageType:    messageType,
 		Content:        content,
@@ -1380,6 +1438,16 @@ func parseGroupChatTextMessage(rawEvent json.RawMessage, rawInfo json.RawMessage
 		Attachments:    attachments,
 		Raw:            rawEvent,
 	}, true
+}
+
+func renderMessageTemplate(template string, data map[string]struct {
+	Value string `json:"value"`
+}) string {
+	result := strings.TrimSpace(template)
+	for key, value := range data {
+		result = strings.ReplaceAll(result, "{{"+key+".DATA}}", value.Value)
+	}
+	return strings.TrimSpace(result)
 }
 
 func parseGroupChatRecallMessage(rawEvent json.RawMessage, rawInfo json.RawMessage) (NetworkMessage, bool) {
@@ -1585,6 +1653,7 @@ func looksLikeMessagePayload(payload string) bool {
 	}
 	lower := strings.ToLower(value)
 	keywords := []string{
+		"groupchat",
 		"sender_id",
 		"sender_screen_name",
 		"recipient_id",

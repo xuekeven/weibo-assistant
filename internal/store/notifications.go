@@ -10,18 +10,21 @@ import (
 )
 
 type NotificationRule struct {
-	ID             int64     `json:"id"`
-	Name           string    `json:"name"`
-	GroupID        *int64    `json:"groupId,omitempty"`
-	WeiboGroupID   string    `json:"weiboGroupId,omitempty"`
-	GroupName      string    `json:"groupName,omitempty"`
-	SenderID       *int64    `json:"senderId,omitempty"`
-	WeiboSenderID  string    `json:"weiboSenderId,omitempty"`
-	SenderNickname string    `json:"senderNickname,omitempty"`
-	MessageType    string    `json:"messageType,omitempty"`
-	Enabled        bool      `json:"enabled"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID                int64      `json:"id"`
+	Name              string     `json:"name"`
+	GroupID           *int64     `json:"groupId,omitempty"`
+	WeiboGroupID      string     `json:"weiboGroupId,omitempty"`
+	GroupName         string     `json:"groupName,omitempty"`
+	SenderID          *int64     `json:"senderId,omitempty"`
+	WeiboSenderID     string     `json:"weiboSenderId,omitempty"`
+	SenderNickname    string     `json:"senderNickname,omitempty"`
+	MessageType       string     `json:"messageType,omitempty"`
+	Enabled           bool       `json:"enabled"`
+	HitCount          int64      `json:"hitCount"`
+	FinalFailureCount int64      `json:"finalFailureCount"`
+	LastMatchedAt     *time.Time `json:"lastMatchedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
 type CreateNotificationRuleParams struct {
@@ -213,28 +216,31 @@ func hasNotificationRuleCondition(groupID *int64, weiboGroupID string, groupName
 func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificationRulesParams) ([]NotificationRule, error) {
 	limit := normalizeLimit(params.Limit, 50, 200)
 	args := []any{limit}
-	whereSQL := ""
+	whereSQL := "where r.archived_at is null"
 	if params.Enabled != nil {
 		args = append([]any{*params.Enabled}, args...)
-		whereSQL = "where enabled = $1"
+		whereSQL += " and r.enabled = $1"
 	}
 
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-		select id,
-		       name,
-		       group_id,
-		       coalesce(weibo_group_id, ''),
-		       coalesce(group_name, ''),
-		       sender_id,
-		       coalesce(weibo_sender_id, ''),
-		       coalesce(sender_nickname, ''),
-		       coalesce(message_type, ''),
-		       enabled,
-		       created_at,
-		       updated_at
-		  from notification_rules
+		select r.id,
+		       r.name,
+		       r.group_id,
+		       coalesce(r.weibo_group_id, ''),
+		       coalesce(r.group_name, ''),
+		       r.sender_id,
+		       coalesce(r.weibo_sender_id, ''),
+		       coalesce(r.sender_nickname, ''),
+		       coalesce(r.message_type, ''),
+		       r.enabled,
+		       (select count(distinct e.message_id) from notification_events e where e.rule_id = r.id),
+		       (select count(*) from notification_events e where e.rule_id = r.id and e.status = 'failed'),
+		       (select max(e.created_at) from notification_events e where e.rule_id = r.id),
+		       r.created_at,
+		       r.updated_at
+		  from notification_rules r
 		  %s
-		 order by updated_at desc, id desc
+		 order by r.updated_at desc, r.id desc
 		 limit $%d
 	`, whereSQL, len(args)), args...)
 	if err != nil {
@@ -256,6 +262,9 @@ func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificati
 			&rule.SenderNickname,
 			&rule.MessageType,
 			&rule.Enabled,
+			&rule.HitCount,
+			&rule.FinalFailureCount,
+			&rule.LastMatchedAt,
 			&rule.CreatedAt,
 			&rule.UpdatedAt,
 		); err != nil {
@@ -264,6 +273,21 @@ func (s *Store) ListNotificationRules(ctx context.Context, params ListNotificati
 		rules = append(rules, rule)
 	}
 	return rules, rows.Err()
+}
+
+func (s *Store) DeleteNotificationRule(ctx context.Context, id int64) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		update notification_rules
+		   set enabled = false, archived_at = now(), updated_at = now()
+		 where id = $1 and name <> '环境变量默认通知规则' and archived_at is null
+	`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return errors.New("notification rule not found or is managed by environment variables")
+	}
+	return nil
 }
 
 func (s *Store) SyncEnvironmentNotificationRule(ctx context.Context, params EnvironmentNotificationRuleParams) (NotificationRule, error) {

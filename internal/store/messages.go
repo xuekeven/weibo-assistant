@@ -23,13 +23,14 @@ type messageDB interface {
 }
 
 type Group struct {
-	ID            int64      `json:"id"`
-	WeiboGroupID  string     `json:"weiboGroupId,omitempty"`
-	Name          string     `json:"name"`
-	AvatarURL     string     `json:"avatarUrl,omitempty"`
-	LastMessageAt *time.Time `json:"lastMessageAt,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	ID                 int64      `json:"id"`
+	WeiboGroupID       string     `json:"weiboGroupId,omitempty"`
+	Name               string     `json:"name"`
+	AvatarURL          string     `json:"avatarUrl,omitempty"`
+	LastMessageAt      *time.Time `json:"lastMessageAt,omitempty"`
+	LastMessagePreview string     `json:"lastMessagePreview,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
 type User struct {
@@ -127,7 +128,9 @@ type ListMessagesParams struct {
 	WeiboGroupID  string
 	SenderID      int64
 	WeiboSenderID string
+	MessageType   string
 	Query         string
+	Since         *time.Time
 	Before        *time.Time
 	Limit         int
 	IncludeRaw    bool
@@ -413,8 +416,10 @@ func (s *Store) CreateMessage(ctx context.Context, params CreateMessageParams) (
 		message.Attachments = attachments
 	}
 
-	if err := updateGroupLastMessageAt(ctx, tx, group.ID, params.SentAt); err != nil {
-		return CreateMessageResult{}, err
+	if params.MessageType != "event" {
+		if err := updateGroupLastMessageAt(ctx, tx, group.ID, params.SentAt); err != nil {
+			return CreateMessageResult{}, err
+		}
 	}
 	notificationsQueued := 0
 	if params.Notification != nil {
@@ -574,15 +579,26 @@ func (s *Store) GetMessageByID(ctx context.Context, id int64, includeRaw bool) (
 func (s *Store) ListGroups(ctx context.Context, params ListGroupsParams) ([]Group, error) {
 	limit := normalizeLimit(params.Limit, 50, 200)
 	rows, err := s.pool.Query(ctx, `
-		select id,
-		       coalesce(weibo_group_id, ''),
-		       name,
-		       coalesce(avatar_url, ''),
-		       last_message_at,
-		       created_at,
-		       updated_at
-		  from weibo_groups
-		 order by last_message_at desc nulls last, updated_at desc, id desc
+		select g.id,
+		       coalesce(g.weibo_group_id, ''),
+		       g.name,
+		       coalesce(g.avatar_url, ''),
+		       latest.sent_at,
+		       coalesce(latest.preview, ''),
+		       g.created_at,
+		       g.updated_at
+		  from weibo_groups g
+		  left join lateral (
+		    select coalesce(m.sent_at, m.captured_at) as sent_at,
+		           coalesce(nullif(m.content, ''), '[' || m.message_type || ']') as preview
+		      from weibo_messages m
+		     where m.group_id = g.id
+		       and m.message_type <> 'event'
+		       and coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'
+		     order by coalesce(m.sent_at, m.captured_at) desc, m.id desc
+		     limit 1
+		  ) latest on true
+		 order by latest.sent_at desc nulls last, g.updated_at desc, g.id desc
 		 limit $1
 	`, limit)
 	if err != nil {
@@ -599,6 +615,7 @@ func (s *Store) ListGroups(ctx context.Context, params ListGroupsParams) ([]Grou
 			&group.Name,
 			&group.AvatarURL,
 			&group.LastMessageAt,
+			&group.LastMessagePreview,
 			&group.CreatedAt,
 			&group.UpdatedAt,
 		); err != nil {
@@ -679,9 +696,18 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 	if params.WeiboSenderID = strings.TrimSpace(params.WeiboSenderID); params.WeiboSenderID != "" {
 		conditions = append(conditions, "u.weibo_user_id = "+addArg(params.WeiboSenderID))
 	}
+	if params.MessageType = strings.TrimSpace(params.MessageType); params.MessageType != "" {
+		conditions = append(conditions, "m.message_type = "+addArg(params.MessageType))
+	} else {
+		conditions = append(conditions, "m.message_type <> 'event'")
+		conditions = append(conditions, "coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'")
+	}
 	if params.Query = strings.TrimSpace(params.Query); params.Query != "" {
 		placeholder := addArg("%" + params.Query + "%")
-		conditions = append(conditions, "(m.content ilike "+placeholder+" or m.weibo_message_id ilike "+placeholder+")")
+		conditions = append(conditions, "(m.content ilike "+placeholder+" or m.weibo_message_id ilike "+placeholder+" or u.nickname ilike "+placeholder+")")
+	}
+	if params.Since != nil {
+		conditions = append(conditions, "coalesce(m.sent_at, m.captured_at) >= "+addArg(*params.Since))
 	}
 	if params.Before != nil {
 		conditions = append(conditions, "coalesce(m.sent_at, m.captured_at) < "+addArg(*params.Before))

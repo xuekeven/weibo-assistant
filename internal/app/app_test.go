@@ -4,8 +4,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xuekeven/weibo-assistant/internal/browser"
+	"github.com/xuekeven/weibo-assistant/internal/config"
 	"github.com/xuekeven/weibo-assistant/internal/store"
 )
+
+func TestArchiveOnlyEventDoesNotCreateNotification(t *testing.T) {
+	notification, matched := notificationForNetworkMessage(config.Config{}, browser.NetworkMessage{
+		MessageType: "event",
+		SenderID:    "1401527553",
+	})
+	if notification != nil || matched {
+		t.Fatalf("archive-only event must not create notification: notification=%#v matched=%v", notification, matched)
+	}
+}
 
 func TestBuildTargetNotificationContent(t *testing.T) {
 	location := time.FixedZone("CST", 8*60*60)

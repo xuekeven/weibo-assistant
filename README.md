@@ -6,6 +6,7 @@
 
 - [已实现能力](#已实现能力)
 - [运行架构](#运行架构)
+- [消息补偿与消息回溯](#消息补偿与消息回溯)
 - [项目结构](#项目结构)
   - [根目录文件和运行时目录](#根目录文件和运行时目录)
   - [Go 程序入口](#go-程序入口)
@@ -35,6 +36,7 @@
 
 - Chrome/Chromium 持久化登录态和无头运行。
 - 微博 WebSocket 消息解析、图片附件识别与 URL 补全。
+- monitor 启动补偿、WebSocket 断线补漏和按时间范围回溯历史消息。
 - PostgreSQL 消息、群组、用户、附件和监控状态存储。
 - 消息事务写入、数据库唯一键去重和实时 `LISTEN/NOTIFY`。
 - 数据库通知规则匹配，环境变量自动同步默认规则。
@@ -64,6 +66,27 @@ frontend       -> server API / WebSocket
 - `server`：API、健康检查、指标和前端 WebSocket，默认端口 `6001`。
 - `monitor`：Chrome、微博消息监听、入库和通知 worker。
 - `frontend`：托管 `frontend/dist`，默认端口 `6002`。
+
+## 消息补偿与消息回溯
+
+实时 WebSocket 负责低延迟接收，微博 `query_messages.json` 历史接口负责补偿和消息回溯。三种同步统一由 monitor 执行，并复用当前 Chrome 登录态：
+
+| 模式 | 触发方式 | 作用 | 企业微信通知 |
+| --- | --- | --- | --- |
+| 启动补偿 `startup` | monitor 启动并选中目标群后自动创建 | 从最新页向前同步，直到追到启动时数据库已有的最新消息 ID | 不发送 |
+| 断线补漏 `recovery` | 检测到 CDP/微博 WebSocket 断开并重连后自动创建 | 从最新页向前扫描，补上断线窗口内遗漏的消息 | 新补入且命中规则时发送 |
+| 消息回溯 `manual` | 前端“消息回溯”或向上加载到本地边界时创建 | 按指定起始时间或时间区间归档更早消息 | 不发送 |
+
+三种模式都会在扫描到明确边界后停止。启动补偿优先追到任务创建时记录的 `stop_mid`，也就是启动前数据库已有的最新微博消息 ID；没有 `stop_mid` 时，退回到“扫描到任务创建前已经存在于 PostgreSQL 的微博消息 ID 后停止”。每条消息仍经过 `dedupe_key` 唯一约束，因此实时消息与历史同步并发到达时不会重复入库，也不会重复通知。
+
+前端操作：
+
+1. 选择群聊后点击右上角“消息回溯”。
+2. “回溯到”填写希望向前同步到的时间；可选“区间结束”只保存指定区间内的消息。
+3. 点击“开始回溯”，任务由 PostgreSQL 队列交给 monitor 执行。
+4. 前端通过 WebSocket 接收任务进度和新增消息，不需要保持弹窗打开。
+
+消息列表向上翻到本地最早记录后，也会自动创建一个单页历史同步任务。任务只有在 monitor 正常运行且已经取得微博聊天页 CDP target 时才会执行；页面显示“等待 monitor”时，应检查 monitor 服务和微博登录态。
 
 ## 项目结构
 
@@ -130,19 +153,23 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `internal/app/app.go` | 应用装配层；创建数据库、API、monitor、指标上报和通知 worker，并处理优雅退出 |
 | `internal/app/frontend.go` | 用 Go HTTP 服务托管 `frontend/dist`，包含单页应用路由回退 |
 | `internal/app/image_cache.go` | 保存图片 FID 到 URL 的有界 TTL 缓存 |
+| `internal/app/history_sync.go` | 执行启动补偿、断线补漏和消息回溯任务，控制分页及停止边界 |
 | `internal/app/metrics.go` | 收集 monitor 进程指标并定期写入 PostgreSQL |
 | `internal/browser/login.go` | 使用持久化 profile 打开 Chrome，供首次微博登录 |
 | `internal/browser/monitor.go` | 启动 Chrome、探测页面、选择目标群、监听网络事件、解析消息并负责 CDP 自动重连 |
 | `internal/browser/cdp.go` | 实现与 Chrome DevTools Protocol WebSocket 的连接、请求和帧读写 |
+| `internal/browser/history.go` | 通过已登录页面请求微博历史接口并解析为统一消息模型 |
 | `internal/config/config.go` | 从 `.env` 和系统环境变量读取配置，并按子命令分别校验 |
 | `internal/httpapi/server.go` | 注册 API、健康检查、指标和开发路由，配置 CORS |
 | `internal/httpapi/messages.go` | 群组、用户、消息、通知规则和通知事件的 HTTP handler |
+| `internal/httpapi/history_sync.go` | 创建和查询历史同步任务的 HTTP handler |
 | `internal/httpapi/realtime.go` | 监听 PostgreSQL `LISTEN/NOTIFY` 并转换为前端实时事件 |
 | `internal/httpapi/websocket.go` | 管理浏览器 WebSocket 客户端、握手、帧读取和广播 |
 | `internal/migrate/migrate.go` | 按版本执行 `migrations/*.sql`，校验 SHA-256 并防止并发迁移 |
 | `internal/notifier/wework.go` | 调用企业微信中继服务；重试调度由 app/outbox worker 负责 |
 | `internal/store/store.go` | 创建 PostgreSQL 连接池、封装事务、monitor 状态和实时事件 |
 | `internal/store/messages.go` | 群组、用户、消息和附件的查询、事务写入及数据库幂等去重 |
+| `internal/store/history_sync.go` | 历史同步任务入队、领取、进度、完成状态和消息边界查询 |
 | `internal/store/notifications.go` | 通知规则匹配和通知事件查询 |
 | `internal/store/outbox.go` | 通知任务入队、并发安全领取、成功和失败状态更新 |
 | `internal/store/observability.go` | 运行指标、通知积压和最后消息时间的数据库读写 |
@@ -161,7 +188,10 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `frontend/tsconfig.json` | TypeScript 编译配置 |
 | `frontend/index.html` | Vite HTML 入口 |
 | `frontend/src/main.ts` | 创建并挂载 Vue 应用 |
-| `frontend/src/App.vue` | 当前主要页面组件和交互逻辑 |
+| `frontend/src/App.vue` | 页面数据、WebSocket 和跨组件状态编排 |
+| `frontend/src/components/` | 群聊侧栏、筛选栏、消息、管理中心和消息详情组件 |
+| `frontend/src/components/HistorySyncDialog.vue` | 历史消息时间范围选择和任务进度弹窗 |
+| `frontend/src/utils/presentation.ts` | 共享时间、头像颜色和状态文案格式化 |
 | `frontend/src/api.ts` | 后端 API、WebSocket 地址和请求封装 |
 | `frontend/src/styles.css` | 全局页面样式 |
 | `frontend/src/vite-env.d.ts` | Vite 环境变量的 TypeScript 类型声明 |
@@ -169,6 +199,8 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `frontend/node_modules/` | npm 下载的依赖，禁止提交，可重新安装 |
 
 开发时由 Node.js/Vite 运行 `frontend/src`；生产时 Node.js 先构建出 `frontend/dist`，再由 Go `frontend` 子命令或 Nginx 托管。
+
+前端使用 Nuxt UI `4.6.1`（独立 Vue + Vite 模式）作为组件库，并通过 Tailwind CSS 4 提供设计令牌和工具样式。`vite.config.ts` 注册 `@nuxt/ui/vite`，`src/main.ts` 注册 Vue plugin，根组件使用 `UApp`。
 
 ### 数据库迁移 migrations
 
@@ -178,6 +210,10 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `002_notification_outbox.sql` | 增加企业微信异步通知任务表及待处理、超时任务索引 |
 | `003_notification_rule_matching.sql` | 扩展通知规则匹配字段和约束 |
 | `004_observability_metrics.sql` | 增加跨进程 monitor 运行指标表 |
+| `005_notification_rule_archive.sql` | 为通知规则增加安全归档字段和活动规则索引 |
+| `006_stable_weibo_message_id.sql` | 规范微博消息 ID 并加强稳定去重 |
+| `007_classify_generic_groupchat_events.sql` | 规范通用群聊事件的消息类型 |
+| `008_history_sync_jobs.sql` | 增加历史同步任务队列、进度和单群活动任务约束 |
 
 迁移文件按 `NNN_name.sql` 命名。已经执行过的迁移不要修改；数据库结构继续变化时，应新增下一个编号的文件。
 
@@ -444,6 +480,7 @@ curl http://localhost:6001/metrics
 curl http://localhost:6001/api/monitor/status
 curl http://localhost:6001/api/groups
 curl 'http://localhost:6001/api/messages?limit=50&includeRaw=false'
+curl http://localhost:6001/api/groups/3/history-sync
 curl 'http://localhost:6001/api/notification-rules?enabled=true'
 curl 'http://localhost:6001/api/notification-events?limit=50'
 ```
@@ -452,6 +489,23 @@ curl 'http://localhost:6001/api/notification-events?limit=50'
 - `/readyz`：检查数据库，并返回 monitor freshness、最后消息时间和通知积压。
 - `/healthz`：兼容入口，行为与 `/readyz` 相同。
 - `/metrics`：Prometheus 文本指标。
+
+创建消息回溯任务：
+
+```bash
+curl -X POST http://localhost:6001/api/groups/3/history-sync \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "from": "2026-06-01T00:00:00+08:00",
+    "to": "2026-07-01T00:00:00+08:00",
+    "pages": 1000
+  }'
+```
+
+- `from`：可选，向前同步到的最早时间。
+- `to`：可选，只保存不晚于该时间的消息；与 `from` 一起构成时间区间。
+- `pages`：可选，最多请求页数，范围 `1-1000`，默认 `1000`。
+- `GET /api/groups/{id}/history-sync`：查询该群最近一次任务及分页、入库数量、停止原因和错误。
 
 列表参数、ID、布尔值和时间参数会严格校验。JSON 请求体最大 `1 MiB`，拒绝未知字段和多个顶层 JSON 值。
 

@@ -15,6 +15,7 @@ type websocketEvent struct {
 	Message           *store.Message           `json:"message,omitempty"`
 	MonitorStatus     *monitorStatusView       `json:"monitorStatus,omitempty"`
 	NotificationEvent *store.NotificationEvent `json:"notificationEvent,omitempty"`
+	HistorySyncJob    *store.HistorySyncJob    `json:"historySyncJob,omitempty"`
 	SentAt            time.Time                `json:"sentAt"`
 }
 
@@ -82,6 +83,22 @@ func (s *Server) handleRealtimeEvent(ctx context.Context, event store.RealtimeEv
 			Type:              event.Type,
 			NotificationEvent: &notificationEvent,
 			SentAt:            time.Now(),
+		})
+	case "history_sync_updated":
+		if event.HistorySyncJobID <= 0 {
+			return
+		}
+		job, err := s.store.GetHistorySyncJob(ctx, event.HistorySyncJobID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("load history sync event failed", "jobID", event.HistorySyncJobID, "error", err)
+			}
+			return
+		}
+		s.wsHub.broadcast(websocketEvent{
+			Type:           event.Type,
+			HistorySyncJob: &job,
+			SentAt:         time.Now(),
 		})
 	default:
 		s.wsHub.broadcast(websocketEvent{

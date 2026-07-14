@@ -113,6 +113,31 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		<-metricsDone
 	}()
 	imageURLByFID := newImageURLCache(cfg.ImageCacheTTL, cfg.ImageCacheMaxItems)
+	historyTarget := &historyPageTarget{}
+	disconnects := &disconnectWindow{}
+	var targetGroup store.Group
+	if strings.TrimSpace(cfg.TargetGroupID) != "" {
+		targetGroup, err = st.UpsertGroup(ctx, store.UpsertGroupParams{
+			WeiboGroupID: cfg.TargetGroupID,
+			Name:         fallbackText(cfg.TargetGroupName, cfg.TargetGroupID),
+		})
+		if err != nil {
+			return fmt.Errorf("prepare history sync group: %w", err)
+		}
+		if err := enqueueStartupHistorySync(ctx, st, targetGroup); err != nil {
+			return fmt.Errorf("enqueue startup history sync: %w", err)
+		}
+	}
+	historyCtx, cancelHistory := context.WithCancel(ctx)
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		runHistorySyncWorker(historyCtx, cfg, st, metrics, imageURLByFID, historyTarget)
+	}()
+	defer func() {
+		cancelHistory()
+		<-historyDone
+	}()
 	if strings.TrimSpace(cfg.WeworkRelayAPIKey) != "" {
 		workerCtx, cancelWorker := context.WithCancel(ctx)
 		workerDone := make(chan struct{})
@@ -157,11 +182,15 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			}
 			enrichNetworkAttachmentsWithImageCache(message.Attachments, imageURLByFID)
 			notification, targetMatched := notificationForNetworkMessage(cfg, message)
+			groupName := message.GroupName
+			if strings.TrimSpace(groupName) == "" && message.GroupID == cfg.TargetGroupID {
+				groupName = cfg.TargetGroupName
+			}
 			params := store.CreateMessageParams{
 				WeiboMessageID: message.WeiboMessageID,
 				Group: store.UpsertGroupParams{
 					WeiboGroupID: message.GroupID,
-					Name:         fallbackText(message.GroupName, message.GroupID),
+					Name:         fallbackText(groupName, message.GroupID),
 				},
 				Sender: store.UpsertUserParams{
 					WeiboUserID: message.SenderID,
@@ -234,8 +263,24 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		},
 		OnCDPState: func(connected bool, reconnected bool) {
 			metrics.cdpConnected.Store(connected)
+			if !connected {
+				recordHistoryDisconnect(ctx, st, targetGroup, disconnects)
+			}
 			if reconnected {
 				metrics.cdpReconnects.Add(1)
+				from, to, stopMID := disconnects.TakeRecoveryWindow()
+				go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+			}
+		},
+		OnPageTarget: historyTarget.Set,
+		OnWebSocketState: func(connected bool, reconnected bool) {
+			if !connected {
+				recordHistoryDisconnect(ctx, st, targetGroup, disconnects)
+				return
+			}
+			if reconnected {
+				from, to, stopMID := disconnects.TakeRecoveryWindow()
+				go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
 			}
 		},
 		OnMessagesParsed: func(count int) {
@@ -314,6 +359,9 @@ func storeAttachmentsFromNetwork(attachments []browser.NetworkAttachment) []stor
 }
 
 func notificationForNetworkMessage(cfg config.Config, message browser.NetworkMessage) (*store.EnqueueNotificationParams, bool) {
+	if message.MessageType == "event" {
+		return nil, false
+	}
 	storedMessage := store.Message{
 		WeiboSenderID: message.SenderID,
 		SenderName:    message.SenderName,
@@ -365,7 +413,7 @@ func runNotificationWorker(ctx context.Context, cfg config.Config, st *store.Sto
 		}
 
 		client := notifier.NewWeworkClient(job.RelayURL, cfg.WeworkRelayAPIKey, job.ToUser)
-		response, sendErr := client.SendText(ctx, job.Content)
+		response, sendErr := client.SendTextWithIdempotency(ctx, job.Content, fmt.Sprintf("weibo-outbox-%d", job.ID))
 		if sendErr == nil {
 			if err := st.MarkNotificationOutboxSent(ctx, job.ID); err != nil {
 				slog.Error("mark notification outbox sent failed", "jobID", job.ID, "error", err)

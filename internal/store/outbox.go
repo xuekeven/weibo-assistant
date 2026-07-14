@@ -28,6 +28,64 @@ type NotificationOutboxJob struct {
 	MaxAttempts  int
 }
 
+type NotificationOutboxItem struct {
+	ID            int64      `json:"id"`
+	RuleID        *int64     `json:"ruleId,omitempty"`
+	MessageID     int64      `json:"messageId"`
+	Content       string     `json:"content"`
+	ToUser        string     `json:"touser"`
+	Status        string     `json:"status"`
+	AttemptCount  int        `json:"attemptCount"`
+	MaxAttempts   int        `json:"maxAttempts"`
+	NextAttemptAt time.Time  `json:"nextAttemptAt"`
+	LastError     string     `json:"lastError,omitempty"`
+	SentAt        *time.Time `json:"sentAt,omitempty"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+func (s *Store) ListNotificationOutbox(ctx context.Context, limit int) ([]NotificationOutboxItem, error) {
+	limit = normalizeLimit(limit, 50, 200)
+	rows, err := s.pool.Query(ctx, `
+		select id, rule_id, message_id, content, touser, status, attempt_count, max_attempts,
+		       next_attempt_at, coalesce(last_error, ''), sent_at, updated_at
+		  from notification_outbox
+		 order by case status when 'failed' then 0 when 'retry' then 1 when 'pending' then 2 else 3 end,
+		          updated_at desc
+		 limit $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]NotificationOutboxItem, 0)
+	for rows.Next() {
+		var item NotificationOutboxItem
+		if err := rows.Scan(&item.ID, &item.RuleID, &item.MessageID, &item.Content, &item.ToUser,
+			&item.Status, &item.AttemptCount,
+			&item.MaxAttempts, &item.NextAttemptAt, &item.LastError, &item.SentAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) RetryNotificationOutbox(ctx context.Context, id int64) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		update notification_outbox
+		   set status = 'retry', attempt_count = 0, next_attempt_at = now(),
+		       locked_at = null, last_error = null, updated_at = now()
+		 where id = $1 and status in ('failed', 'retry')
+	`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return errors.New("notification job is not retryable")
+	}
+	return nil
+}
+
 func enqueueNotification(ctx context.Context, db messageDB, messageID int64, params EnqueueNotificationParams) (bool, error) {
 	// 该函数由消息事务内部调用：消息和通知任务要么一起成功，要么一起回滚。
 	content := strings.TrimSpace(params.Content)

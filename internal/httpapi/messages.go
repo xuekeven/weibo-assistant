@@ -49,6 +49,10 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	since, ok := parseOptionalTime(w, r, "since")
+	if !ok {
+		return
+	}
 	before, ok := parseOptionalTime(w, r, "before")
 	if !ok {
 		return
@@ -75,7 +79,9 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		WeiboGroupID:  r.URL.Query().Get("weiboGroupId"),
 		SenderID:      senderID,
 		WeiboSenderID: r.URL.Query().Get("weiboSenderId"),
+		MessageType:   r.URL.Query().Get("messageType"),
 		Query:         r.URL.Query().Get("q"),
+		Since:         since,
 		Before:        before,
 		Limit:         limit,
 		IncludeRaw:    includeRaw,
@@ -131,6 +137,24 @@ func (s *Server) handleListGroupMessages(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": messages,
 	})
+}
+
+func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/messages/", "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	includeRaw, ok := parseBoolWithDefault(w, r, "includeRaw", false)
+	if !ok {
+		return
+	}
+	message, err := s.store.GetMessageByID(r.Context(), id, includeRaw)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, message)
 }
 
 func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +244,19 @@ func (s *Server) handleUpdateNotificationRule(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, rule)
 }
 
+func (s *Server) handleDeleteNotificationRule(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/notification-rules/", "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteNotificationRule(r.Context(), id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListNotificationEvents(w http.ResponseWriter, r *http.Request) {
 	ruleID, ok := queryInt64Range(w, r, "ruleId", 0, 1)
 	if !ok {
@@ -260,6 +297,32 @@ func (s *Server) handleCreateNotificationEvent(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusCreated, event)
+}
+
+func (s *Server) handleListNotificationOutbox(w http.ResponseWriter, r *http.Request) {
+	limit, ok := queryIntRange(w, r, "limit", 50, 1, 200)
+	if !ok {
+		return
+	}
+	items, err := s.store.ListNotificationOutbox(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleRetryNotificationOutbox(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/notification-outbox/", "/retry")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.RetryNotificationOutbox(r.Context(), id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "retry"})
 }
 
 func queryIntRange(w http.ResponseWriter, r *http.Request, key string, fallback int, min int, max int) (int, bool) {

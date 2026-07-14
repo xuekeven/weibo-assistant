@@ -110,6 +110,7 @@ type RealtimeEvent struct {
 	Type                string `json:"type"`
 	MessageID           int64  `json:"messageId,omitempty"`
 	NotificationEventID int64  `json:"notificationEventId,omitempty"`
+	HistorySyncJobID    int64  `json:"historySyncJobId,omitempty"`
 }
 
 func (s *Store) NotifyRealtimeEvent(ctx context.Context, event RealtimeEvent) error {

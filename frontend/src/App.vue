@@ -1,32 +1,102 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import GroupSidebar from './components/GroupSidebar.vue'
+import HistorySyncDialog from './components/HistorySyncDialog.vue'
+import ManagementCenter, { type ManagementTab, type RuleForm } from './components/ManagementCenter.vue'
+import MessageDetail from './components/MessageDetail.vue'
+import MessageFilters from './components/MessageFilters.vue'
+import MessageItem from './components/MessageItem.vue'
+import { formatTime } from './utils/presentation'
 import {
+  createHistorySync,
+  createNotificationRule,
   createRealtimeSocket,
+  deleteNotificationRule,
+  getMessage,
+  getHistorySync,
+  getReadiness,
   getMonitorStatus,
   listGroups,
   listMessages,
   listNotificationEvents,
+  listNotificationOutbox,
+  listNotificationRules,
+  listUsers,
+  retryNotificationOutbox,
+  updateNotificationRule,
   type Group,
+  type HistorySyncJob,
   type Message,
   type MonitorStatus,
   type NotificationEvent,
-  type RealtimeEvent
+  type NotificationOutboxItem,
+  type NotificationRule,
+  type RealtimeEvent,
+  type User
 } from './api'
 
 const groups = ref<Group[]>([])
 const messages = ref<Message[]>([])
 const notifications = ref<NotificationEvent[]>([])
+const notificationRules = ref<NotificationRule[]>([])
+const outboxItems = ref<NotificationOutboxItem[]>([])
+const readiness = ref<Record<string, unknown>>({})
+const users = ref<User[]>([])
 const monitor = ref<MonitorStatus | null>(null)
 const selectedGroupId = ref<number | null>(null)
+const groupQuery = ref('')
 const query = ref('')
-const targetSenderId = ref('')
+const selectedSenderId = ref('')
+const timeRange = ref('all')
+const customDate = ref('')
 const loading = ref(false)
+const messagesLoading = ref(false)
 const error = ref('')
 const showNotifications = ref(false)
+const panelTab = ref<ManagementTab>('notifications')
+const selectedMessage = ref<Message | null>(null)
+const loadingOlder = ref(false)
+const hasOlderMessages = ref(true)
+const historyDialogOpen = ref(false)
+const historyFrom = ref('')
+const historyTo = ref('')
+const historyJob = ref<HistorySyncJob | null>(null)
+const historySubmitting = ref(false)
+const historyError = ref('')
+const ruleForm = ref<RuleForm>({ name: '', groupId: '', senderId: '', messageType: '', enabled: true })
+const editingRuleId = ref<number | null>(null)
+const panelError = ref('')
+const previewImageURL = ref('')
+const monitorExpanded = ref(false)
+const mobileSidebarOpen = ref(false)
+const sidebarWidth = ref(280)
+const unreadByGroup = ref<Record<number, number>>({})
+const newMessageCount = ref(0)
 const autoFollowMessages = ref(true)
 const messageListRef = ref<HTMLElement | null>(null)
 const realtimeStatus = ref('connecting')
 const currentTime = ref(new Date())
+const allSelectValue = '__all__'
+
+const timeRangeOptions = [
+  { value: 'all', label: '全部时间' },
+  { value: '24h', label: '最近 24 小时' },
+  { value: '7d', label: '最近 7 天' },
+  { value: '30d', label: '最近 30 天' },
+  { value: 'custom', label: '指定日期以后' }
+]
+
+const senderOptions = computed(() => [
+  { label: '全部发送人', value: allSelectValue },
+  ...users.value.filter((user) => user.weiboUserId).map((user) => ({ label: user.nickname || '未命名用户', value: user.weiboUserId || '' }))
+])
+
+// Reka UI 不允许 SelectItem 使用空字符串作为 value。界面层用哨兵值表示
+// “全部”，读写业务状态时再转换回空字符串，避免影响 API 查询参数。
+const senderSelectValue = computed({
+  get: () => selectedSenderId.value || allSelectValue,
+  set: (value: string) => { selectedSenderId.value = value === allSelectValue ? '' : value }
+})
 
 const monitorStatusItems = [
   {
@@ -72,20 +142,25 @@ let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let clockTimer: number | undefined
 let stopped = false
+let lastAutoHistoryBoundary = ''
 
 const selectedGroup = computed(() => {
-  return groups.value.find((group) => group.id === selectedGroupId.value) || null
+  if (selectedGroupId.value === null) return null
+
+  // PostgreSQL 的 bigint 在不同序列化链路中可能表现为 number 或 string。
+  // 这里统一按字符串比较，避免左侧已经高亮，右侧却找不到当前群聊。
+  return groups.value.find((group) => String(group.id) === String(selectedGroupId.value)) || null
 })
 
 const orderedMessages = computed(() => {
-  return [...messages.value].sort((a, b) => {
+  return messages.value.filter(isDisplayableMessage).sort((a, b) => {
     return new Date(a.sentAt || a.capturedAt).getTime() - new Date(b.sentAt || b.capturedAt).getTime()
   })
 })
 
 const monitorIsFresh = computed(() => {
   const heartbeat = monitor.value?.lastHeartbeatAt
-  const staleAfter = monitor.value?.staleAfterSecs || 90
+  const staleAfter = monitor.value?.staleAfterSecs || 180
   if (!heartbeat) return monitor.value?.fresh !== false
   const heartbeatTime = new Date(heartbeat).getTime()
   if (Number.isNaN(heartbeatTime)) return monitor.value?.fresh !== false
@@ -118,9 +193,67 @@ const monitorHeartbeatLabel = computed(() => {
   return `最后监控：${formatTime(value)}${typeof age === 'number' && age >= 0 ? `（${age} 秒前）` : ''}`
 })
 
-const currentTimeLabel = computed(() => `当前时间：${formatTime(currentTime.value.toISOString())}`)
+const visibleGroups = computed(() => {
+  const keyword = groupQuery.value.trim().toLowerCase()
+  return groups.value.filter((group) => {
+    if (group.weiboGroupId?.startsWith('test-')) return false
+    return !keyword || `${group.name} ${group.lastMessagePreview || ''}`.toLowerCase().includes(keyword)
+  })
+})
 
-const visibleGroups = computed(() => groups.value.filter((group) => !group.weiboGroupId?.startsWith('test-')))
+const hasActiveFilters = computed(() => {
+  return Boolean(query.value.trim() || selectedSenderId.value || timeRange.value !== 'all')
+})
+
+const historySyncActive = computed(() => historyJob.value?.status === 'pending' || historyJob.value?.status === 'running')
+
+const activeFilterLabels = computed(() => {
+  const labels: Array<{ key: string; label: string }> = []
+  if (query.value.trim()) labels.push({ key: 'query', label: `关键词：${query.value.trim()}` })
+  if (selectedSenderId.value) {
+    const user = users.value.find((item) => item.weiboUserId === selectedSenderId.value)
+    labels.push({ key: 'sender', label: `发送人：${user?.nickname || selectedSenderId.value}` })
+  }
+  if (timeRange.value !== 'all') {
+    labels.push({ key: 'time', label: timeRangeOptions.find((item) => item.value === timeRange.value)?.label || timeRange.value })
+  }
+  return labels
+})
+
+const realtimeBanner = computed(() => {
+  if (realtimeStatus.value === 'connected') return null
+  if (realtimeStatus.value === 'connecting') return { tone: 'info', text: '正在连接实时消息…' }
+  if (realtimeStatus.value === 'error') return { tone: 'bad', text: '实时连接发生错误，正在尝试恢复。' }
+  return { tone: 'warn', text: '实时连接已断开，正在重连；历史消息仍可查询。' }
+})
+
+const emptyMessage = computed(() => {
+  if (!selectedGroup.value) return '请先从左侧选择一个群聊'
+  if (hasActiveFilters.value) return '没有符合当前筛选条件的消息'
+  return '这个群聊还没有采集到消息'
+})
+
+const actionableNotificationCount = computed(() => outboxItems.value.filter((item) => item.status === 'failed').length)
+
+const messageStats = computed(() => {
+  const senders = new Map<string, number>()
+  const types = new Map<string, number>()
+  for (const message of messages.value) {
+    const sender = message.senderName || message.weiboSenderId || '未知发送人'
+    senders.set(sender, (senders.get(sender) || 0) + 1)
+    types.set(message.messageType, (types.get(message.messageType) || 0) + 1)
+  }
+  return {
+    total: messages.value.length,
+    senders: [...senders.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
+    types: [...types.entries()].sort((a, b) => b[1] - a[1])
+  }
+})
+
+const selectedMessageNotifications = computed(() => {
+  if (!selectedMessage.value) return []
+  return notifications.value.filter((event) => event.messageId === selectedMessage.value?.id)
+})
 
 async function refreshAll() {
   if (refreshInFlight) {
@@ -145,46 +278,110 @@ async function refreshAll() {
 async function runRefresh() {
   error.value = ''
   const shouldFollow = autoFollowMessages.value || messages.value.length === 0
-  const [groupResult, statusResult, notificationResult] = await Promise.all([
+  const [groupResult, statusResult, notificationResult, userResult, ruleResult, outboxResult, readinessResult] = await Promise.all([
     listGroups(),
     getMonitorStatus(),
-    listNotificationEvents()
+    listNotificationEvents(),
+    listUsers(),
+    listNotificationRules(),
+    listNotificationOutbox(),
+    getReadiness()
   ])
 
-  groups.value = groupResult.items || []
+  groups.value = (groupResult.items || []).map(sanitizeGroup)
   monitor.value = statusResult
   notifications.value = notificationResult.items || []
+  users.value = userResult.items || []
+  notificationRules.value = ruleResult.items || []
+  outboxItems.value = outboxResult.items || []
+  readiness.value = readinessResult
 
   if (!selectedGroupId.value && visibleGroups.value.length > 0) {
     selectedGroupId.value = visibleGroups.value[0].id
   }
-  await refreshMessages()
+  if (selectedGroupId.value) {
+    await Promise.all([refreshMessages(), refreshHistorySync()])
+  } else {
+    messages.value = []
+  }
   if (shouldFollow) {
     scrollMessagesToBottom()
   }
 }
 
 async function refreshMessages() {
-  const result = await listMessages({
-    groupId: selectedGroupId.value || undefined,
-    weiboSenderId: targetSenderId.value.trim() || undefined,
-    q: query.value.trim() || undefined,
-    limit: 80
-  })
-  messages.value = result.items || []
+  messagesLoading.value = true
+  try {
+    const result = await listMessages({
+      groupId: selectedGroupId.value || undefined,
+      weiboSenderId: selectedSenderId.value || undefined,
+      q: query.value.trim() || undefined,
+      since: filterSince(timeRange.value),
+      limit: 50
+    })
+    const items = result.items || []
+    messages.value = items.filter(isDisplayableMessage)
+    hasOlderMessages.value = items.length === 50
+  } finally {
+    messagesLoading.value = false
+  }
+}
+
+async function refreshHistorySync() {
+  if (!selectedGroupId.value) {
+    historyJob.value = null
+    return
+  }
+  historyJob.value = (await getHistorySync(selectedGroupId.value)).job
+}
+
+async function applyFilters() {
+  error.value = ''
+  try {
+    await refreshMessages()
+    scrollMessagesToBottom()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function clearFilters() {
+  query.value = ''
+  selectedSenderId.value = ''
+  timeRange.value = 'all'
+  await applyFilters()
+}
+
+async function clearFilter(key: string) {
+  if (key === 'query') query.value = ''
+  if (key === 'sender') selectedSenderId.value = ''
+  if (key === 'time') timeRange.value = 'all'
+  await applyFilters()
 }
 
 async function selectGroup(group: Group) {
   selectedGroupId.value = group.id
+  unreadByGroup.value[group.id] = 0
+  newMessageCount.value = 0
+  updateDocumentTitle()
+  mobileSidebarOpen.value = false
   autoFollowMessages.value = true
-  await refreshMessages()
-  scrollMessagesToBottom()
+  lastAutoHistoryBoundary = ''
+  error.value = ''
+  try {
+    await Promise.all([refreshMessages(), refreshHistorySync()])
+    scrollMessagesToBottom()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
 }
 
 function messageMatchesCurrentFilters(message: Message) {
-  if (selectedGroupId.value && message.groupId !== selectedGroupId.value) return false
-  const sender = targetSenderId.value.trim()
+  if (selectedGroupId.value && String(message.groupId) !== String(selectedGroupId.value)) return false
+  const sender = selectedSenderId.value
   if (sender && message.weiboSenderId !== sender) return false
+  const since = filterSince(timeRange.value)
+  if (since && new Date(message.sentAt || message.capturedAt).getTime() < new Date(since).getTime()) return false
   const keyword = query.value.trim().toLowerCase()
   if (keyword) {
     const haystack = `${message.content || ''} ${message.weiboMessageId || ''} ${message.senderName || ''}`.toLowerCase()
@@ -193,10 +390,34 @@ function messageMatchesCurrentFilters(message: Message) {
   return true
 }
 
+function isDisplayableMessage(message: Message) {
+  if (message.messageType === 'event') return false
+  return !/^微博群聊事件（类型 \d+）$/.test((message.content || '').trim())
+}
+
+function sanitizeGroup(group: Group): Group {
+  if (/^微博群聊事件（类型 \d+）$/.test((group.lastMessagePreview || '').trim())) {
+    return { ...group, lastMessagePreview: '' }
+  }
+  return group
+}
+
 function upsertMessage(message: Message) {
-  const shouldFollow = autoFollowMessages.value || messages.value.length === 0
   const index = messages.value.findIndex((item) => item.id === message.id)
+  if (!isDisplayableMessage(message)) {
+    if (index >= 0) messages.value.splice(index, 1)
+    return
+  }
+  const shouldFollow = autoFollowMessages.value || messages.value.length === 0
   updateGroupFromMessage(message)
+  if (String(message.groupId) !== String(selectedGroupId.value)) {
+    unreadByGroup.value[message.groupId] = (unreadByGroup.value[message.groupId] || 0) + 1
+    updateDocumentTitle()
+  } else if (!shouldFollow) {
+    newMessageCount.value++
+    unreadByGroup.value[message.groupId] = newMessageCount.value
+    updateDocumentTitle()
+  }
   if (!messageMatchesCurrentFilters(message)) {
     if (index >= 0) {
       messages.value.splice(index, 1)
@@ -225,6 +446,7 @@ function updateGroupFromMessage(message: Message) {
       name: message.groupName || groups.value[index].name,
       weiboGroupId: message.weiboGroupId || groups.value[index].weiboGroupId,
       lastMessageAt,
+      lastMessagePreview: message.content || `[${message.messageType}]`,
       updatedAt: lastMessageAt
     })
   } else {
@@ -233,6 +455,7 @@ function updateGroupFromMessage(message: Message) {
       name: message.groupName || `群聊 ${message.groupId}`,
       weiboGroupId: message.weiboGroupId,
       lastMessageAt,
+      lastMessagePreview: message.content || `[${message.messageType}]`,
       updatedAt: lastMessageAt
     })
   }
@@ -262,6 +485,15 @@ function handleRealtimeEvent(event: RealtimeEvent) {
   }
   if (event.type === 'notification_event_created' && event.notificationEvent) {
     prependNotification(event.notificationEvent)
+    return
+  }
+  if (event.type === 'history_sync_updated' && event.historySyncJob && String(event.historySyncJob.groupId) === String(selectedGroupId.value)) {
+    const previousStatus = historyJob.value?.status
+    historyJob.value = event.historySyncJob
+    if (event.historySyncJob.status === 'completed' && previousStatus !== 'completed' && event.historySyncJob.messagesInserted > 0) {
+      hasOlderMessages.value = true
+      void loadOlderMessages(false)
+    }
   }
 }
 
@@ -298,7 +530,13 @@ function isNearMessageBottom(threshold = 120) {
 }
 
 function updateAutoFollow() {
+  if ((messageListRef.value?.scrollTop || 0) < 80) void loadOlderMessages()
   autoFollowMessages.value = isNearMessageBottom()
+  if (autoFollowMessages.value && selectedGroupId.value) {
+    newMessageCount.value = 0
+    unreadByGroup.value[selectedGroupId.value] = 0
+    updateDocumentTitle()
+  }
 }
 
 function scrollMessagesToBottom() {
@@ -308,6 +546,9 @@ function scrollMessagesToBottom() {
       if (!element) return
       element.scrollTop = element.scrollHeight
       autoFollowMessages.value = true
+      newMessageCount.value = 0
+      if (selectedGroupId.value) unreadByGroup.value[selectedGroupId.value] = 0
+      updateDocumentTitle()
     })
   })
 }
@@ -318,44 +559,239 @@ function handleMessageMediaLoaded() {
   }
 }
 
-function formatTime(value?: string) {
-  if (!value) return '--'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).format(date)
+function formatMessageTime(value?: string) {
+  return formatTime(value, { seconds: false, now: currentTime.value })
 }
 
-function initials(name?: string) {
-  const text = (name || '?').trim()
-  return text.slice(0, 1).toUpperCase()
+function filterSince(range: string) {
+  const durations: Record<string, number> = {
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000
+  }
+  if (range === 'custom' && customDate.value) return new Date(`${customDate.value}T00:00:00`).toISOString()
+  const duration = durations[range]
+  return duration ? new Date(Date.now() - duration).toISOString() : undefined
 }
 
-function notificationLabel(status: string) {
-  if (status === 'sent') return '已发送'
-  if (status === 'failed') return '失败'
-  if (status === 'retrying') return '重试中'
-  if (status === 'skipped') return '跳过'
-  return status
+function updateDocumentTitle() {
+  const unread = Object.values(unreadByGroup.value).reduce((sum, value) => sum + value, 0)
+  document.title = unread > 0 ? `(${unread}) 微博助手` : '微博助手'
 }
 
-function imageAttachments(message: Message) {
-  return (message.attachments || []).filter((attachment) => attachment.attachmentType === 'image')
-}
-
-function attachmentFids(message: Message) {
-  return imageAttachments(message)
-    .flatMap((attachment) => {
-      const fids = attachment.meta?.fids
-      return Array.isArray(fids) ? fids.map((fid) => String(fid)) : []
+async function loadOlderMessages(triggerRemote = true) {
+  if (loadingOlder.value || messages.value.length === 0) return
+  if (!hasOlderMessages.value) {
+    if (triggerRemote) await requestOlderHistoryPage()
+    return
+  }
+  const element = messageListRef.value
+  const oldHeight = element?.scrollHeight || 0
+  const oldest = orderedMessages.value[0]
+  loadingOlder.value = true
+  try {
+    const result = await listMessages({
+      groupId: selectedGroupId.value || undefined,
+      weiboSenderId: selectedSenderId.value || undefined,
+      q: query.value.trim() || undefined,
+      since: filterSince(timeRange.value),
+      before: oldest?.sentAt || oldest?.capturedAt,
+      limit: 50
     })
-    .filter(Boolean)
+    const rawOlder = result.items || []
+    const older = rawOlder.filter(isDisplayableMessage)
+    const existing = new Set(messages.value.map((message) => message.id))
+    messages.value.push(...older.filter((message) => !existing.has(message.id)))
+    hasOlderMessages.value = rawOlder.length === 50
+    await nextTick()
+    if (element) element.scrollTop += element.scrollHeight - oldHeight
+    if (triggerRemote && rawOlder.length < 50 && !hasActiveFilters.value) {
+      await requestOlderHistoryPage()
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    loadingOlder.value = false
+  }
+}
+
+async function requestOlderHistoryPage() {
+  if (!selectedGroupId.value || historySyncActive.value || hasActiveFilters.value) return
+  const oldest = orderedMessages.value[0]
+  const boundary = oldest?.weiboMessageId || String(oldest?.id || '')
+  if (!boundary || boundary === lastAutoHistoryBoundary) return
+  lastAutoHistoryBoundary = boundary
+  try {
+    historyJob.value = await createHistorySync(selectedGroupId.value, { pages: 1 })
+  } catch (err) {
+    lastAutoHistoryBoundary = ''
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+function openHistoryDialog() {
+  const defaultFrom = new Date()
+  defaultFrom.setDate(defaultFrom.getDate() - 30)
+  historyFrom.value = toLocalDateTimeInput(defaultFrom)
+  historyTo.value = ''
+  historyError.value = ''
+  historyDialogOpen.value = true
+}
+
+async function submitHistorySync() {
+  if (!selectedGroupId.value || !historyFrom.value) return
+  historySubmitting.value = true
+  historyError.value = ''
+  try {
+    const from = new Date(historyFrom.value)
+    const to = historyTo.value ? new Date(historyTo.value) : undefined
+    if (Number.isNaN(from.getTime()) || (to && Number.isNaN(to.getTime()))) throw new Error('请选择有效的时间。')
+    if (to && from > to) throw new Error('最早消息时间不能晚于最晚消息时间。')
+    historyJob.value = await createHistorySync(selectedGroupId.value, {
+      from: from.toISOString(),
+      to: to?.toISOString(),
+      pages: 1000
+    })
+    historyDialogOpen.value = false
+  } catch (err) {
+    historyError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    historySubmitting.value = false
+  }
+}
+
+function toLocalDateTimeInput(value: Date) {
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000)
+  return local.toISOString().slice(0, 16)
+}
+
+function startRuleFromMessage(message: Message) {
+  editingRuleId.value = null
+  ruleForm.value = {
+    name: `${message.senderName || '目标用户'}提醒`,
+    groupId: message.weiboGroupId || '',
+    senderId: message.weiboSenderId || '',
+    messageType: message.messageType || '',
+    enabled: true
+  }
+  panelTab.value = 'rules'
+  showNotifications.value = true
+  selectedMessage.value = null
+}
+
+async function copyMessageContent(message: Message) {
+  await window.navigator.clipboard.writeText(message.content || '')
+}
+
+async function openMessageDetails(message: Message) {
+  selectedMessage.value = message
+  try {
+    selectedMessage.value = await getMessage(message.id, true)
+  } catch {
+    // 列表数据足以展示基础详情；原始数据加载失败不阻止详情面板打开。
+  }
+}
+
+async function filterByMessageSender(message: Message) {
+  selectedSenderId.value = message.weiboSenderId || ''
+  selectedMessage.value = null
+  await applyFilters()
+}
+
+function editRule(rule: NotificationRule) {
+  editingRuleId.value = rule.id
+  ruleForm.value = {
+    name: rule.name,
+    groupId: rule.weiboGroupId || '',
+    senderId: rule.weiboSenderId || '',
+    messageType: rule.messageType || '',
+    enabled: rule.enabled
+  }
+}
+
+async function saveRule() {
+  panelError.value = ''
+  if (!ruleForm.value.groupId && !ruleForm.value.senderId && !ruleForm.value.messageType) {
+    panelError.value = '请至少选择群聊、发送人或消息类型中的一个条件。'
+    return
+  }
+  const payload = {
+    name: ruleForm.value.name,
+    weiboGroupId: ruleForm.value.groupId,
+    weiboSenderId: ruleForm.value.senderId,
+    messageType: ruleForm.value.messageType,
+    enabled: ruleForm.value.enabled
+  }
+  try {
+    if (editingRuleId.value) await updateNotificationRule(editingRuleId.value, payload)
+    else await createNotificationRule(payload)
+    editingRuleId.value = null
+    ruleForm.value = { name: '', groupId: '', senderId: '', messageType: '', enabled: true }
+    notificationRules.value = (await listNotificationRules()).items || []
+  } catch (err) {
+    panelError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function removeRule(rule: NotificationRule) {
+  if (rule.name === '环境变量默认通知规则') return
+  await deleteNotificationRule(rule.id)
+  notificationRules.value = notificationRules.value.filter((item) => item.id !== rule.id)
+}
+
+async function retryJob(item: NotificationOutboxItem) {
+  await retryNotificationOutbox(item.id)
+  outboxItems.value = (await listNotificationOutbox()).items || []
+}
+
+async function retryAllFailedJobs() {
+  for (const item of outboxItems.value.filter((job) => job.status === 'failed')) {
+    await retryNotificationOutbox(item.id)
+  }
+  outboxItems.value = (await listNotificationOutbox()).items || []
+}
+
+function exportMessages(format: 'csv' | 'json' | 'md') {
+  let content = ''
+  let type = 'text/plain'
+  if (format === 'json') {
+    content = JSON.stringify(messages.value, null, 2)
+    type = 'application/json'
+  } else if (format === 'csv') {
+    const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`
+    content = ['时间,群聊,发送人,消息类型,内容', ...orderedMessages.value.map((message) => [message.sentAt || message.capturedAt, message.groupName, message.senderName, message.messageType, message.content].map(escape).join(','))].join('\n')
+    type = 'text/csv'
+  } else {
+    content = orderedMessages.value.map((message) => `- **${message.senderName || '未知发送人'}** ${formatMessageTime(message.sentAt || message.capturedAt)}\n  ${message.content || `[${message.messageType}]`}`).join('\n')
+  }
+  const url = URL.createObjectURL(new Blob([content], { type: `${type};charset=utf-8` }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `weibo-messages-${new Date().toISOString().slice(0, 10)}.${format}`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function startSidebarResize(event: PointerEvent) {
+  const startX = event.clientX
+  const startWidth = sidebarWidth.value
+  const move = (moveEvent: PointerEvent) => {
+    sidebarWidth.value = Math.min(420, Math.max(240, startWidth + moveEvent.clientX - startX))
+  }
+  const stop = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', stop)
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', stop)
+}
+
+function openMobileSidebar() {
+  mobileSidebarOpen.value = true
+}
+
+function toggleManagementCenter() {
+  showNotifications.value = !showNotifications.value
 }
 
 onMounted(() => {
@@ -375,166 +811,184 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="app-shell" :class="{ 'with-notify': showNotifications }">
-    <aside class="group-pane">
-      <div class="pane-head">
-        <div>
-          <h1>微博助手</h1>
-          <p>{{ visibleGroups.length }} 个群聊</p>
-        </div>
-        <button class="icon-button" type="button" title="刷新" @click="refreshAll">↻</button>
-      </div>
-
-      <div class="monitor-strip" :class="monitorTone">
-        <div class="monitor-copy">
-          <span class="monitor-title-row">
-            <span class="status-dot"></span>
-            <strong>{{ monitorLabel }}</strong>
-            <span class="status-help" tabindex="0" :aria-label="monitorStatusTooltip">
-              ?
-              <span class="status-tooltip" role="tooltip">
-                <span class="status-tooltip-title">{{ monitorStatusTooltip }}</span>
-                <span v-for="item in monitorStatusItems" :key="item.key" class="status-tooltip-row">
-                  <span class="status-tooltip-heading">
-                    <strong>{{ item.label }}</strong>
-                    <span v-if="item.key === monitor?.status" class="status-current-tag">当前</span>
-                  </span>
-                  <span class="status-tooltip-desc">{{ item.description }}</span>
-                </span>
-              </span>
-            </span>
-          </span>
-          <small class="monitor-time-line">{{ monitorHeartbeatLabel }}</small>
-          <small class="monitor-time-line">{{ currentTimeLabel }}</small>
-        </div>
-      </div>
-
-      <div class="group-list">
-        <button
-          v-for="group in visibleGroups"
-          :key="group.id"
-          class="group-row"
-          :class="{ active: group.id === selectedGroupId }"
-          type="button"
-          @click="selectGroup(group)"
-        >
-          <span class="avatar">{{ initials(group.name) }}</span>
-          <span class="group-copy">
-            <strong>{{ group.name }}</strong>
-          </span>
-          <time>{{ formatTime(group.lastMessageAt || group.updatedAt) }}</time>
-        </button>
-      </div>
-    </aside>
+  <!-- 当前界面没有使用 Toast。独立 Vue + Vite 模式下关闭默认 Toaster，
+       避免时钟刷新触发 ToastProvider 的 emitsOptions 空指针。 -->
+  <UApp :toaster="null">
+    <main
+    class="app-shell"
+    :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen }"
+    :style="{ '--sidebar-width': `${sidebarWidth}px` }"
+  >
+    <div v-if="mobileSidebarOpen" class="mobile-sidebar-backdrop" @click="mobileSidebarOpen = false"></div>
+    <GroupSidebar
+      v-model:group-query="groupQuery"
+      v-model:monitor-expanded="monitorExpanded"
+      :groups="groups"
+      :visible-groups="visibleGroups"
+      :selected-group-id="selectedGroupId"
+      :loading="loading"
+      :monitor="monitor"
+      :monitor-tone="monitorTone"
+      :monitor-label="monitorLabel"
+      :monitor-heartbeat-label="monitorHeartbeatLabel"
+      :realtime-status="realtimeStatus"
+      :unread-by-group="unreadByGroup"
+      @refresh="refreshAll"
+      @select="selectGroup"
+      @resize="startSidebarResize"
+    />
 
     <section class="chat-pane">
       <header class="chat-head">
         <div>
+          <UButton class="mobile-menu-button" color="neutral" variant="outline" icon="i-lucide-menu" aria-label="打开群聊列表" @click="openMobileSidebar" />
           <h2>{{ selectedGroup?.name || '消息流' }}</h2>
         </div>
         <div class="head-actions">
-          <button class="text-button" type="button" @click="showNotifications = !showNotifications">
-            企微通知 {{ notifications.length }}
-          </button>
+          <UButton
+            color="neutral"
+            variant="outline"
+            icon="i-lucide-history"
+            :label="historySyncActive ? '回溯中' : '消息回溯'"
+            :loading="historySyncActive"
+            :disabled="!selectedGroup || historySyncActive"
+            @click="openHistoryDialog"
+          />
+          <UButton color="neutral" variant="outline" icon="i-lucide-panels-top-left" label="管理中心" @click="toggleManagementCenter">
+            <template v-if="actionableNotificationCount" #trailing><UBadge color="error" size="sm">{{ actionableNotificationCount }}</UBadge></template>
+          </UButton>
         </div>
       </header>
 
-      <div class="filters">
-        <label>
-          <span>关键词</span>
-          <input v-model="query" type="search" placeholder="搜索消息" @keydown.enter="refreshAll" />
-        </label>
-        <label>
-          <span>发送人 ID</span>
-          <input v-model="targetSenderId" type="search" placeholder="weiboSenderId" @keydown.enter="refreshAll" />
-        </label>
-        <button type="button" @click="refreshAll">筛选</button>
+      <div v-if="realtimeBanner" class="connection-banner" :class="realtimeBanner.tone" role="status">
+        <span class="connection-indicator"></span>
+        <span>{{ realtimeBanner.text }}</span>
       </div>
 
-      <div v-if="error" class="error-line">{{ error }}</div>
+      <MessageFilters
+        v-model:query="query"
+        v-model:sender="senderSelectValue"
+        v-model:time-range="timeRange"
+        v-model:custom-date="customDate"
+        :sender-options="senderOptions"
+        :time-range-options="timeRangeOptions"
+        :active-filters="activeFilterLabels"
+        :loading="messagesLoading"
+        :has-active-filters="hasActiveFilters"
+        @apply="applyFilters"
+        @clear="clearFilters"
+        @clear-filter="clearFilter"
+      />
+
+      <div v-if="monitor && (!monitorIsFresh || monitor.lastError)" class="monitor-alert" role="alert">
+        <strong>{{ monitorIsFresh ? '监控报告了异常' : '监控心跳已过期' }}</strong>
+        <span>{{ monitor.lastError || '请检查 weibo-assistant-monitor.service 的状态和日志。' }}</span>
+      </div>
+
+      <div v-if="error" class="error-line" role="alert">
+        <div>
+          <strong>数据加载失败</strong>
+          <span>{{ error }}</span>
+        </div>
+        <button type="button" @click="refreshAll">重试</button>
+      </div>
 
       <div ref="messageListRef" class="message-list" @scroll.passive="updateAutoFollow">
-        <div v-if="selectedGroup" class="timeline-mark">
-          {{ selectedGroup.name }} · 最近 {{ orderedMessages.length }} 条
-        </div>
+        <div class="message-content">
+          <div v-if="selectedGroup && !messagesLoading" class="timeline-mark">
+            {{ selectedGroup.name }} · {{ hasActiveFilters ? `找到 ${orderedMessages.length} 条` : `最近 ${orderedMessages.length} 条` }}
+          </div>
 
-        <article v-for="message in orderedMessages" :key="message.id" class="message-row">
-          <span class="avatar sender">{{ initials(message.senderName) }}</span>
-          <div class="message-main">
-            <div class="message-meta">
-              <strong>{{ message.senderName || message.weiboSenderId || '未知发送人' }}</strong>
-              <span>{{ message.weiboSenderId }}</span>
-              <time>{{ formatTime(message.sentAt || message.capturedAt) }}</time>
-            </div>
-            <div class="bubble" :class="{ media: imageAttachments(message).length > 0 }">
-              <p v-if="message.content && (message.content !== '分享图片' || imageAttachments(message).length === 0)">
-                {{ message.content }}
-              </p>
-              <div v-if="imageAttachments(message).length > 0" class="image-grid">
-                <template
-                  v-for="attachment in imageAttachments(message)"
-                  :key="attachment.id || attachment.url || JSON.stringify(attachment.meta)"
-                >
-                  <a
-                    v-if="attachment.url"
-                    class="image-item"
-                    :href="attachment.url"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <img
-                      :src="attachment.url"
-                      alt="微博图片消息"
-                      loading="lazy"
-                      @load="handleMessageMediaLoaded"
-                    />
-                  </a>
-                  <span v-else class="image-item pending">
-                    <strong>图片待解析</strong>
-                    <small v-if="attachmentFids(message).length > 0">fid {{ attachmentFids(message).join(', ') }}</small>
-                  </span>
-                </template>
-              </div>
-              <p v-if="!message.content && imageAttachments(message).length === 0">[{{ message.messageType }}]</p>
+          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="loadingOlder || historySyncActive" @click="loadOlderMessages()">
+            {{ historySyncActive ? `正在回溯消息（${historyJob?.pagesFetched || 0} 页）` : loadingOlder ? '正在加载…' : hasOlderMessages ? '加载更早消息' : '回溯更早消息' }}
+          </button>
+
+          <div v-if="messagesLoading && orderedMessages.length === 0" class="message-skeletons" aria-label="正在加载消息">
+            <div v-for="index in 5" :key="index" class="message-skeleton" :class="{ short: index % 2 === 0 }">
+              <USkeleton class="skeleton-avatar" /><div><USkeleton class="skeleton-meta" /><USkeleton class="skeleton-bubble" /></div>
             </div>
           </div>
-        </article>
 
-        <div v-if="orderedMessages.length === 0" class="empty-state">
-          暂无消息
+          <MessageItem
+            v-for="message in orderedMessages"
+            :key="message.id"
+            :message="message"
+            :query="query"
+            @details="openMessageDetails"
+            @preview="previewImageURL = $event"
+            @media-loaded="handleMessageMediaLoaded"
+          />
+
+          <div v-if="!messagesLoading && orderedMessages.length === 0" class="empty-state">
+            <span class="empty-icon">⌕</span>
+            <strong>{{ emptyMessage }}</strong>
+            <span v-if="hasActiveFilters">可以调整条件，或清空筛选查看全部消息。</span>
+            <span v-else-if="selectedGroup">新消息到达后会自动出现在这里。</span>
+            <button v-if="hasActiveFilters" type="button" @click="clearFilters">清空筛选</button>
+          </div>
         </div>
-
-        <button
-          v-if="!autoFollowMessages && orderedMessages.length > 0"
-          class="jump-bottom"
-          type="button"
-          @click="scrollMessagesToBottom"
-        >
-          回到底部
-        </button>
       </div>
+
+      <button
+        v-if="!autoFollowMessages && orderedMessages.length > 0"
+        class="jump-bottom"
+        type="button"
+        @click="scrollMessagesToBottom"
+      >
+        <span>{{ newMessageCount > 0 ? `${newMessageCount} 条新消息` : '回到底部' }}</span>
+        <UIcon name="i-lucide-arrow-down" class="jump-bottom-icon" aria-hidden="true" />
+      </button>
     </section>
 
-    <div v-if="showNotifications" class="notify-backdrop" @click="showNotifications = false"></div>
-    <aside v-if="showNotifications" class="notify-pane">
-      <div class="pane-head">
-        <div>
-          <h2>企微通知记录</h2>
-          <p>最近 {{ notifications.length }} 条</p>
-        </div>
-        <button class="icon-button" type="button" title="关闭" @click="showNotifications = false">×</button>
-      </div>
+    <HistorySyncDialog
+      v-if="historyDialogOpen"
+      v-model:from="historyFrom"
+      v-model:to="historyTo"
+      :submitting="historySubmitting"
+      :error="historyError"
+      @close="historyDialogOpen = false"
+      @submit="submitHistorySync"
+    />
 
-      <div class="notify-list">
-        <article v-for="event in notifications" :key="event.id" class="notify-row" :class="event.status">
-          <div>
-            <strong>{{ notificationLabel(event.status) }}</strong>
-            <span>消息 #{{ event.messageId }}</span>
-          </div>
-          <time>{{ formatTime(event.createdAt) }}</time>
-          <p v-if="event.errorMessage">{{ event.errorMessage }}</p>
-        </article>
-      </div>
-    </aside>
-  </main>
+    <ManagementCenter
+      v-if="showNotifications"
+      v-model:tab="panelTab"
+      v-model:rule-form="ruleForm"
+      :outbox-items="outboxItems"
+      :notification-rules="notificationRules"
+      :groups="groups"
+      :users="users"
+      :actionable-count="actionableNotificationCount"
+      :panel-error="panelError"
+      :editing-rule-id="editingRuleId"
+      :message-stats="messageStats"
+      :selected-group="selectedGroup"
+      :history-job="historyJob"
+      :history-sync-active="historySyncActive"
+      @close="showNotifications = false"
+      @retry-all="retryAllFailedJobs"
+      @retry="retryJob"
+      @save-rule="saveRule"
+      @edit-rule="editRule"
+      @remove-rule="removeRule"
+      @export="exportMessages"
+      @open-history="openHistoryDialog"
+    />
+
+    <MessageDetail
+      v-if="selectedMessage"
+      :message="selectedMessage"
+      :events="selectedMessageNotifications"
+      @close="selectedMessage = null"
+      @copy="copyMessageContent(selectedMessage)"
+      @filter-sender="filterByMessageSender(selectedMessage)"
+      @create-rule="startRuleFromMessage(selectedMessage)"
+    />
+
+    <div v-if="previewImageURL" class="image-preview" role="dialog" aria-modal="true" aria-label="图片预览" @click="previewImageURL = ''">
+      <button type="button" aria-label="关闭图片预览" @click="previewImageURL = ''">×</button>
+      <img :src="previewImageURL" alt="微博图片预览" @click.stop />
+    </div>
+    </main>
+  </UApp>
 </template>
