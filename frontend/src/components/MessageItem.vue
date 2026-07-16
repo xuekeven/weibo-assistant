@@ -15,6 +15,8 @@ defineEmits<{
 }>()
 
 const imageAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'image'))
+const videoAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'video'))
+const isVideoMessage = computed(() => props.message.messageType === 'video' || videoAttachments.value.length > 0)
 const parts = computed(() => messageContentParts(props.message.content))
 const fids = computed(() => imageAttachments.value.flatMap(attachmentFids).filter(Boolean))
 const failedAvatarURL = ref('')
@@ -41,9 +43,45 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function standaloneURL(content?: string) {
+  const text = (content || '').trim()
+  if (!/^https?:\/\/[^\s<>"']+$/i.test(text)) return ''
+
+  try {
+    const url = new URL(text)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
 function attachmentFids(attachment: Attachment) {
   const values = attachment.meta?.fids
   return Array.isArray(values) ? values.map((fid) => String(fid)) : []
+}
+
+function imagePreviewURL(attachment: Attachment) {
+  const rawURL = (attachment.url || '').trim()
+  if (!rawURL) return ''
+
+  try {
+    const url = new URL(rawURL)
+    if (!url.pathname.endsWith('/msget_thumbnail') && !url.pathname.endsWith('/msget')) {
+      return rawURL
+    }
+
+    const fid = url.searchParams.get('fid') || attachmentFids(attachment)[0]
+    if (!fid) return rawURL
+
+    const previewURL = new URL('/2/mss/msget', url.origin)
+    previewURL.searchParams.set('fid', fid)
+    previewURL.searchParams.set('source', url.searchParams.get('source') || '209678993')
+    previewURL.searchParams.set('imageType', url.searchParams.get('imageType') || 'origin')
+    previewURL.searchParams.set('ts', String(Date.now()))
+    return previewURL.toString()
+  } catch {
+    return rawURL
+  }
 }
 
 function imageKey(attachment: Attachment) {
@@ -70,14 +108,29 @@ function markImageFailed(attachment: Attachment) {
           <button class="message-secondary-action" type="button" @click="$emit('details', message)">详情</button>
         </span>
       </div>
-      <div class="bubble" :class="{ media: imageAttachments.length > 0, recalled: message.messageType === 'recall' }">
-        <template v-if="message.content && (message.content !== '分享图片' || imageAttachments.length === 0)">
+      <div class="bubble" :class="{ media: imageAttachments.length > 0 || isVideoMessage, recalled: message.messageType === 'recall' }">
+        <template v-if="message.content && (message.content !== '分享图片' || imageAttachments.length === 0) && (message.content !== '分享视频' || !isVideoMessage)">
           <blockquote v-if="parts.quote"><span v-for="(token, index) in contentTokens(parts.quote)" :key="index" :class="token.tone">{{ token.text }}</span></blockquote>
-          <p v-if="parts.body"><span v-for="(token, index) in contentTokens(parts.body)" :key="index" :class="token.tone">{{ token.text }}</span></p>
+          <p v-if="parts.body">
+            <a
+              v-if="standaloneURL(parts.body)"
+              class="message-link"
+              :href="standaloneURL(parts.body)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >{{ parts.body }}</a>
+            <template v-else>
+              <span v-for="(token, index) in contentTokens(parts.body)" :key="index" :class="token.tone">{{ token.text }}</span>
+            </template>
+          </p>
         </template>
+        <div v-if="isVideoMessage" class="video-card">
+          <span class="video-badge">视频消息</span>
+          <small v-if="videoAttachments.length > 0">视频 fid {{ attachmentFids(videoAttachments[0]).join(', ') || '待解析' }}</small>
+        </div>
         <div v-if="imageAttachments.length > 0" class="image-grid">
           <template v-for="attachment in imageAttachments" :key="attachment.id || attachment.url || JSON.stringify(attachment.meta)">
-            <button v-if="attachment.url" class="image-item" type="button" title="预览图片" @click="$emit('preview', attachment.url)">
+            <button v-if="attachment.url" class="image-item" type="button" title="预览图片" @click="$emit('preview', imagePreviewURL(attachment))">
               <img
                 :src="attachment.url"
                 alt="微博图片消息"

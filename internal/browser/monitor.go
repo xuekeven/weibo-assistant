@@ -1371,6 +1371,7 @@ func parseGroupChatMessage(rawEvent json.RawMessage, rawInfo json.RawMessage, ev
 			PushProcExt struct {
 				SendTime int64 `json:"send_time"`
 			} `json:"push_proc_ext"`
+			VideoPicFID json.Number `json:"video_pic_fid"`
 		} `json:"annotations"`
 		FromUser struct {
 			ScreenName      string `json:"screen_name"`
@@ -1398,7 +1399,7 @@ func parseGroupChatMessage(rawEvent json.RawMessage, rawInfo json.RawMessage, ev
 	if weiboMessageID == "" || weiboMessageID == "0" {
 		weiboMessageID = fmt.Sprintf("event:%x", sha256.Sum256(rawEvent))
 	}
-	attachments := imageAttachmentsFromInfo(rawInfo, info.MediaType, info.FIDs)
+	attachments := mediaAttachmentsFromInfo(rawInfo, info.MediaType, info.FIDs, info.Annotations.VideoPicFID)
 	content := strings.TrimSpace(info.Content)
 	if content == "" {
 		content = renderMessageTemplate(info.Template, info.Data)
@@ -1510,6 +1511,9 @@ func parseGroupChatRecallMessage(rawEvent json.RawMessage, rawInfo json.RawMessa
 }
 
 func messageTypeFromGroupChatInfo(value int, mediaType int, attachmentCount int, fallback string) string {
+	if mediaType == 10 {
+		return "video"
+	}
 	if mediaType == 1 || attachmentCount > 0 {
 		return "image"
 	}
@@ -1522,6 +1526,33 @@ func messageTypeFromGroupChatInfo(value int, mediaType int, attachmentCount int,
 		}
 		return "unknown"
 	}
+}
+
+func mediaAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []json.Number, videoPicFID json.Number) []NetworkAttachment {
+	if mediaType == 10 {
+		return videoAttachmentsFromInfo(mediaType, fids, videoPicFID)
+	}
+	return imageAttachmentsFromInfo(rawInfo, mediaType, fids)
+}
+
+func videoAttachmentsFromInfo(mediaType int, fids []json.Number, videoPicFID json.Number) []NetworkAttachment {
+	attachments := make([]NetworkAttachment, 0, 2)
+	if videoPicFID.String() != "" && videoPicFID.String() != "0" {
+		attachments = append(attachments, NetworkAttachment{
+			AttachmentType: "image",
+			Meta:           imageAttachmentMeta(mediaType, []json.Number{videoPicFID}, ""),
+		})
+	}
+	for _, fid := range fids {
+		if fid.String() == "" || fid.String() == "0" {
+			continue
+		}
+		attachments = append(attachments, NetworkAttachment{
+			AttachmentType: "video",
+			Meta:           videoAttachmentMeta(mediaType, []json.Number{fid}),
+		})
+	}
+	return attachments
 }
 
 func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []json.Number) []NetworkAttachment {
@@ -1574,6 +1605,27 @@ func imageAttachmentMeta(mediaType int, fids []json.Number, url string) json.Raw
 	if strings.TrimSpace(url) == "" {
 		meta["url_status"] = "missing_in_websocket_payload"
 	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func videoAttachmentMeta(mediaType int, fids []json.Number) json.RawMessage {
+	meta := map[string]any{
+		"media_type": mediaType,
+	}
+	if len(fids) > 0 {
+		values := make([]string, 0, len(fids))
+		for _, fid := range fids {
+			if fid.String() != "" {
+				values = append(values, fid.String())
+			}
+		}
+		meta["fids"] = values
+	}
+	meta["url_status"] = "missing_in_websocket_payload"
 	raw, err := json.Marshal(meta)
 	if err != nil {
 		return nil

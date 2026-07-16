@@ -1069,7 +1069,7 @@ onUnmounted(() => {
 
     <div v-if="previewImageURL" class="image-preview" role="dialog" aria-modal="true" aria-label="图片预览" @click="previewImageURL = ''">
       <button type="button" aria-label="关闭图片预览" @click="previewImageURL = ''">×</button>
-      <img :src="previewImageURL" alt="微博图片预览" @click.stop />
+      <img :src="previewImageURL" alt="微博图片预览" referrerpolicy="no-referrer" @click.stop />
     </div>
     </main>
   </a-config-provider>

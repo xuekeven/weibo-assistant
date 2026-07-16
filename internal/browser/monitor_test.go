@@ -124,6 +124,54 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 	}
 }
 
+func TestParseNetworkMessagesVideoWithCoverFID(t *testing.T) {
+	payload := `[
+		{
+			"data": {
+				"type": "groupchat",
+				"sub_type": 321,
+				"info": {
+					"gid": 4761715839862414,
+					"content": "分享视频",
+					"from_uid": 2706566322,
+					"from_user": {
+						"screen_name": "拾人牙慧的复读机",
+						"profile_image_url": "https://tvax2.sinaimg.cn/avatar.jpg"
+					},
+					"media_type": 10,
+					"type": 321,
+					"id": 5321456835628344,
+					"time": 1784217640,
+					"fids": [5321456833529563],
+					"annotations": {
+						"include_video": 0,
+						"video_pic_fid": 5321456092450432
+					}
+				}
+			},
+			"channel": "/im/7608757850"
+		}
+	]`
+
+	messages := parseNetworkMessages(payload)
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	message := messages[0]
+	if message.MessageType != "video" {
+		t.Fatalf("expected video message type, got %q", message.MessageType)
+	}
+	if len(message.Attachments) != 2 {
+		t.Fatalf("expected cover and video attachments, got %#v", message.Attachments)
+	}
+	if message.Attachments[0].AttachmentType != "image" {
+		t.Fatalf("expected first attachment to be video cover image, got %#v", message.Attachments[0])
+	}
+	if message.Attachments[1].AttachmentType != "video" {
+		t.Fatalf("expected second attachment to be video metadata, got %#v", message.Attachments[1])
+	}
+}
+
 func TestParseNetworkMessagesUsesStableIDAcrossVersionChanges(t *testing.T) {
 	payload := `[
 		{

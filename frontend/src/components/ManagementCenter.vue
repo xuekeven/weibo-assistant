@@ -53,7 +53,7 @@ function statShare(value: number, entries: [string, number][]) {
 }
 
 function messageTypeLabel(type: string) {
-  return ({ text: '文本', image: '图片', system: '系统消息', recall: '撤回', unknown: '其他' } as Record<string, string>)[type] || type
+  return ({ text: '文本', image: '图片', video: '视频', system: '系统消息', recall: '撤回', unknown: '其他' } as Record<string, string>)[type] || type
 }
 
 function historyJobLabel(job: HistorySyncJob, progressing: boolean) {
@@ -114,7 +114,7 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
         <input v-model="ruleForm.name" required placeholder="规则名称" />
         <select v-model="ruleForm.groupId"><option value="">全部群聊</option><option v-for="group in groups" :key="group.id" :value="group.weiboGroupId">{{ group.name }}</option></select>
         <select v-model="ruleForm.senderId"><option value="">全部发送人</option><option v-for="user in users" :key="user.id" :value="user.weiboUserId">{{ user.nickname }}</option></select>
-        <select v-model="ruleForm.messageType"><option value="">全部消息类型</option><option value="text">文本</option><option value="image">图片</option><option value="system">系统消息</option><option value="recall">撤回</option><option value="unknown">其他</option></select>
+        <select v-model="ruleForm.messageType"><option value="">全部消息类型</option><option value="text">文本</option><option value="image">图片</option><option value="video">视频</option><option value="system">系统消息</option><option value="recall">撤回</option><option value="unknown">其他</option></select>
         <label><input v-model="ruleForm.enabled" type="checkbox" /> 启用</label>
         <button class="primary-action" type="submit">{{ editingRuleId ? '保存修改' : '创建规则' }}</button>
       </form>

@@ -518,6 +518,27 @@ h2 {
   gap: 8px;
 }
 
+.video-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #647480;
+  font-size: 12px;
+}
+
+.video-badge {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #eaf2f8;
+  color: #356783;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .image-item {
   display: flex;
   width: auto;
@@ -960,6 +981,19 @@ button:disabled {
 
 .bubble {
   max-width: min(780px, 82%);
+}
+
+.message-link {
+  color: #0f7f68;
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.message-link:hover {
+  color: #0b6b58;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .bubble blockquote {
