@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { Attachment, Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
 
@@ -17,6 +17,8 @@ defineEmits<{
 const imageAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'image'))
 const parts = computed(() => messageContentParts(props.message.content))
 const fids = computed(() => imageAttachments.value.flatMap(attachmentFids).filter(Boolean))
+const failedAvatarURL = ref('')
+const failedImageURLs = ref<Record<string, boolean>>({})
 
 function messageContentParts(content?: string) {
   const text = (content || '').trim()
@@ -43,6 +45,14 @@ function attachmentFids(attachment: Attachment) {
   const values = attachment.meta?.fids
   return Array.isArray(values) ? values.map((fid) => String(fid)) : []
 }
+
+function imageKey(attachment: Attachment) {
+  return String(attachment.id || attachment.url || JSON.stringify(attachment.meta || {}))
+}
+
+function markImageFailed(attachment: Attachment) {
+  failedImageURLs.value = { ...failedImageURLs.value, [imageKey(attachment)]: true }
+}
 </script>
 
 <template>
@@ -50,7 +60,8 @@ function attachmentFids(attachment: Attachment) {
     <button type="button" :title="formatTime(message.sentAt || message.capturedAt)" @click="$emit('details', message)">{{ message.content || '微博群聊系统消息' }}</button>
   </article>
   <article v-else class="message-row">
-    <span class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
+    <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="message.senderAvatar" alt="" loading="lazy" @error="failedAvatarURL = message.senderAvatar || ''" />
+    <span v-else class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
     <div class="message-main">
       <div class="message-meta">
         <strong :title="message.weiboSenderId ? `微博用户 ID：${message.weiboSenderId}` : undefined">{{ message.senderName || message.weiboSenderId || '未知发送人' }}</strong>
@@ -67,7 +78,15 @@ function attachmentFids(attachment: Attachment) {
         <div v-if="imageAttachments.length > 0" class="image-grid">
           <template v-for="attachment in imageAttachments" :key="attachment.id || attachment.url || JSON.stringify(attachment.meta)">
             <button v-if="attachment.url" class="image-item" type="button" title="预览图片" @click="$emit('preview', attachment.url)">
-              <img :src="attachment.url" alt="微博图片消息" loading="lazy" @load="$emit('mediaLoaded')" />
+              <img
+                :src="attachment.url"
+                alt="微博图片消息"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                @load="$emit('mediaLoaded')"
+                @error="markImageFailed(attachment)"
+              />
+              <span v-if="failedImageURLs[imageKey(attachment)]" class="image-fallback">图片加载失败</span>
             </button>
             <span v-else class="image-item pending"><strong>图片待解析</strong><small v-if="fids.length > 0">fid {{ fids.join(', ') }}</small></span>
           </template>

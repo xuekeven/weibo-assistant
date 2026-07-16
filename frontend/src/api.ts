@@ -29,6 +29,7 @@ export type Message = {
   senderId?: number
   weiboSenderId?: string
   senderName?: string
+  senderAvatar?: string
   messageType: string
   content?: string
   sentAt?: string
@@ -122,6 +123,10 @@ export type NotificationOutboxItem = {
   updatedAt: string
 }
 
+export type AppConfig = {
+  targetSenderId?: string
+}
+
 export type RealtimeEvent = {
   type: string
   message?: Message
@@ -206,6 +211,10 @@ export function listUsers(q = '', limit = 200) {
 
 export function getMonitorStatus() {
   return request<MonitorStatus>('/api/monitor/status')
+}
+
+export function getAppConfig() {
+  return request<AppConfig>('/api/config')
 }
 
 export function getHistorySync(groupId: number) {

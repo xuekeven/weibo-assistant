@@ -220,12 +220,14 @@ func (s *Store) GetOldestMessageMID(ctx context.Context, groupID int64) (string,
 	return mid, err
 }
 
-func (s *Store) GetNewestMessageMID(ctx context.Context, groupID int64) (string, error) {
+func (s *Store) GetNewestHistoryBoundaryMID(ctx context.Context, groupID int64) (string, error) {
 	var mid string
 	err := s.pool.QueryRow(ctx, `
 		select coalesce(weibo_message_id, '')
 		  from weibo_messages
-		 where group_id = $1 and coalesce(weibo_message_id, '') <> ''
+		 where group_id = $1
+		   and coalesce(weibo_message_id, '') <> ''
+		   and message_type <> 'event'
 		 order by coalesce(sent_at, captured_at) desc, id desc
 		 limit 1
 	`, groupID).Scan(&mid)

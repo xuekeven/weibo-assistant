@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { SearchOutlined } from '@ant-design/icons-vue'
+
 type Option = { label: string; value: string }
 type FilterLabel = { key: string; label: string }
 
@@ -8,6 +10,7 @@ defineProps<{
   activeFilters: FilterLabel[]
   loading: boolean
   hasActiveFilters: boolean
+  canViewTargetSender: boolean
 }>()
 
 const query = defineModel<string>('query', { required: true })
@@ -19,23 +22,23 @@ defineEmits<{
   apply: []
   clear: []
   clearFilter: [key: string]
+  senderChange: []
+  viewTargetSender: []
 }>()
 </script>
 
 <template>
-  <form class="filters" @submit.prevent="$emit('apply')">
-    <label class="filter-field keyword-field"><span>搜索</span><UInput v-model="query" size="md" icon="i-lucide-search" placeholder="搜索消息内容或发送人" :ui="{ base: 'text-base' }" class="message-search-input w-full" /></label>
+  <form class="filters" :class="{ 'has-custom-date': timeRange === 'custom' }" @submit.prevent="$emit('apply')">
+    <label class="filter-field keyword-field"><span>关键词</span><a-input v-model:value="query" size="large" placeholder="精确匹配消息正文" class="message-search-input"><template #prefix><SearchOutlined /></template></a-input></label>
     <label class="filter-field sender-field">
       <span>发送人</span>
-      <UInputMenu v-model="sender" size="md" :items="senderOptions" value-key="value" label-key="label" placeholder="搜索发送人" open-on-focus :ui="{ base: 'text-base', item: 'text-base', empty: 'text-base' }" class="sender-input-menu w-full">
-        <template #empty>没有匹配的发送人</template>
-      </UInputMenu>
+      <a-select v-model:value="sender" size="large" show-search :options="senderOptions" option-filter-prop="label" placeholder="搜索发送人" class="sender-input-menu" not-found-content="没有匹配的发送人" @change="$emit('senderChange')" />
     </label>
-    <label class="filter-field compact-field"><span>时间</span><USelect v-model="timeRange" size="md" :items="timeRangeOptions" :ui="{ base: 'text-base', item: 'text-base' }" class="w-full" /></label>
-    <label v-if="timeRange === 'custom'" class="filter-field compact-field custom-date-field"><span>开始日期</span><UInput v-model="customDate" size="md" type="date" :ui="{ base: 'text-base' }" class="w-full" /></label>
+    <label class="filter-field compact-field"><span>时间</span><a-select v-model:value="timeRange" size="large" :options="timeRangeOptions" /></label>
+    <label v-if="timeRange === 'custom'" class="filter-field compact-field custom-date-field"><span>开始日期</span><a-input v-model:value="customDate" size="large" type="date" /></label>
     <div class="filter-actions">
-      <UButton class="filter-submit" size="md" type="submit" icon="i-lucide-search" :loading="loading" label="查询" />
-      <UButton v-if="hasActiveFilters" class="filter-reset" size="md" type="button" color="neutral" variant="ghost" :disabled="loading" label="清空" @click="$emit('clear')" />
+      <a-button class="filter-submit" type="primary" size="large" :loading="loading" :disabled="!canViewTargetSender" @click="$emit('viewTargetSender')">查看关注</a-button>
+      <a-button v-if="hasActiveFilters" class="filter-reset" size="large" :disabled="loading" @click="$emit('clear')">清空</a-button>
     </div>
     <div v-if="activeFilters.length" class="active-filters" aria-label="当前筛选条件">
       <button v-for="filter in activeFilters" :key="filter.key" type="button" @click="$emit('clearFilter', filter.key)">{{ filter.label }} <span aria-hidden="true">×</span></button>

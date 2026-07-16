@@ -37,7 +37,7 @@ func TestHistorySyncAgainstLoggedInBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopMID, err := st.GetNewestMessageMID(ctx, group.ID)
+	stopMID, err := st.GetNewestHistoryBoundaryMID(ctx, group.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

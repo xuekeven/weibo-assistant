@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { DownOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import type { Group, MonitorStatus } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
 
@@ -33,7 +34,7 @@ defineEmits<{
         <p>{{ groupQuery ? `${visibleGroups.length}/${groups.length}` : visibleGroups.length }} 个群聊</p>
       </div>
       <div class="pane-actions">
-        <UButton color="neutral" variant="outline" size="sm" icon="i-lucide-refresh-cw" aria-label="刷新全部数据" :loading="loading" :disabled="loading" @click="$emit('refresh')" />
+        <a-button size="small" aria-label="刷新全部数据" :loading="loading" :disabled="loading" @click="$emit('refresh')"><ReloadOutlined /></a-button>
       </div>
     </div>
 
@@ -42,7 +43,7 @@ defineEmits<{
         <span class="monitor-title-row">
           <span class="status-dot"></span>
           <strong>{{ monitorLabel }}</strong>
-          <UIcon name="i-lucide-chevron-down" class="monitor-chevron" :class="{ expanded: monitorExpanded }" />
+          <DownOutlined class="monitor-chevron" :class="{ expanded: monitorExpanded }" />
         </span>
         <span v-if="monitorExpanded" class="monitor-details">
           <span><b>Chrome / CDP</b><em>{{ monitorLabel }}</em></span>
@@ -55,19 +56,19 @@ defineEmits<{
     </button>
 
     <div class="group-search">
-      <UInput v-model="groupQuery" size="sm" icon="i-lucide-search" placeholder="搜索群聊" aria-label="搜索群聊" class="group-search-input w-full" />
+      <a-input v-model:value="groupQuery" size="large" placeholder="搜索群聊" aria-label="搜索群聊" class="group-search-input"><template #prefix><SearchOutlined /></template></a-input>
     </div>
 
     <div class="group-list">
       <div v-if="loading && visibleGroups.length === 0" class="group-skeletons" aria-label="正在加载群聊">
-        <USkeleton v-for="index in 3" :key="index" class="group-skeleton" />
+        <a-skeleton v-for="index in 3" :key="index" active :title="false" :paragraph="{ rows: 2 }" class="group-skeleton" />
       </div>
       <button v-for="group in visibleGroups" :key="group.id" class="group-row" :class="{ active: String(group.id) === String(selectedGroupId) }" type="button" @click="$emit('select', group)">
         <img v-if="group.avatarUrl" class="avatar" :src="group.avatarUrl" alt="" />
         <span v-else class="avatar" :style="{ backgroundColor: avatarColor(group.weiboGroupId || group.name) }">{{ initials(group.name) }}</span>
         <span class="group-copy"><strong>{{ group.name }}</strong><span>{{ group.lastMessagePreview || '等待新消息' }}</span></span>
         <time>{{ formatTime(group.lastMessageAt || group.updatedAt, { seconds: false }) }}</time>
-        <UBadge v-if="unreadByGroup[group.id]" class="unread-badge" color="primary" size="sm">{{ unreadByGroup[group.id] > 99 ? '99+' : unreadByGroup[group.id] }}</UBadge>
+        <a-badge v-if="unreadByGroup[group.id]" class="unread-badge" :count="unreadByGroup[group.id]" :overflow-count="99" />
       </button>
       <div v-if="!loading && visibleGroups.length === 0" class="sidebar-empty">
         <strong>{{ groupQuery ? '没有匹配的群聊' : '还没有群聊' }}</strong>

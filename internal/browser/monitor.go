@@ -1184,10 +1184,17 @@ func (c *imageReferenceCollector) walk(value any, path []string) imageReferenceS
 		return scope
 	case []any:
 		scope := imageReferenceScope{}
+		containsFIDs := false
 		for _, child := range typed {
 			childScope := c.walk(child, path)
+			if len(childScope.fids) > 0 {
+				containsFIDs = true
+			}
 			scope.fids = appendUniqueStrings(scope.fids, childScope.fids...)
 			scope.urls = appendUniqueStrings(scope.urls, childScope.urls...)
+		}
+		if containsFIDs {
+			return imageReferenceScope{}
 		}
 		return scope
 	case string:
@@ -1526,11 +1533,9 @@ func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []jso
 	if len(urls) == 0 {
 		attachments := make([]NetworkAttachment, 0, max(1, len(fids)))
 		for _, fid := range fids {
-			url := weiboThumbnailURL(fid.String())
 			attachments = append(attachments, NetworkAttachment{
 				AttachmentType: "image",
-				URL:            url,
-				Meta:           imageAttachmentMeta(mediaType, []json.Number{fid}, url),
+				Meta:           imageAttachmentMeta(mediaType, []json.Number{fid}, ""),
 			})
 		}
 		if len(attachments) == 0 {
@@ -1551,14 +1556,6 @@ func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []jso
 		})
 	}
 	return attachments
-}
-
-func weiboThumbnailURL(fid string) string {
-	fid = strings.TrimSpace(fid)
-	if fid == "" {
-		return ""
-	}
-	return "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=" + neturl.QueryEscape(fid) + "&high=240&width=240&size=111,240&source=209678993&imageType=origin"
 }
 
 func imageAttachmentMeta(mediaType int, fids []json.Number, url string) json.RawMessage {

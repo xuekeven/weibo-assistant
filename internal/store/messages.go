@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ type Message struct {
 	SenderID       *int64          `json:"senderId,omitempty"`
 	WeiboSenderID  string          `json:"weiboSenderId,omitempty"`
 	SenderName     string          `json:"senderName,omitempty"`
+	SenderAvatar   string          `json:"senderAvatar,omitempty"`
 	MessageType    string          `json:"messageType"`
 	Content        string          `json:"content,omitempty"`
 	SentAt         *time.Time      `json:"sentAt,omitempty"`
@@ -408,6 +410,7 @@ func (s *Store) CreateMessage(ctx context.Context, params CreateMessageParams) (
 	message.WeiboGroupID = group.WeiboGroupID
 	message.SenderName = user.Nickname
 	message.WeiboSenderID = user.WeiboUserID
+	message.SenderAvatar = user.AvatarURL
 	if len(params.Attachments) > 0 {
 		attachments, err := insertAttachments(ctx, tx, message.ID, params.Attachments)
 		if err != nil {
@@ -446,7 +449,6 @@ func insertAttachments(ctx context.Context, db messageDB, messageID int64, attac
 		if strings.TrimSpace(attachment.AttachmentType) == "" {
 			attachment.AttachmentType = "unknown"
 		}
-		normalizeImageAttachmentURL(&attachment)
 		var saved Attachment
 		err := db.QueryRow(ctx, `
 			insert into weibo_message_attachments (message_id, attachment_type, url, local_path, meta)
@@ -478,15 +480,17 @@ func insertAttachments(ctx context.Context, db messageDB, messageID int64, attac
 func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveImageAttachmentParams) (int64, error) {
 	fid := strings.TrimSpace(params.FID)
 	imageURL := strings.TrimSpace(params.URL)
+	sourceURL := strings.TrimSpace(params.SourceURL)
 	if fid == "" || imageURL == "" {
 		return 0, nil
 	}
+	imageURL = normalizeWeiboThumbnailURL(imageURL, sourceURL)
 
 	metaPatch := map[string]any{
 		"resolved_url": imageURL,
 	}
-	if strings.TrimSpace(params.SourceURL) != "" {
-		metaPatch["resolved_url_source"] = strings.TrimSpace(params.SourceURL)
+	if sourceURL != "" {
+		metaPatch["resolved_url_source"] = sourceURL
 	}
 	metaPatchRaw, err := json.Marshal(metaPatch)
 	if err != nil {
@@ -514,7 +518,17 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 		     set url = $1,
 		         meta = coalesce(meta, '{}'::jsonb) || $2::jsonb
 		   where attachment_type = 'image'
-		     and coalesce(url, '') = ''
+		     and (
+		           coalesce(url, '') = ''
+			           or (
+			                url like '%size=111,240%'
+			                and not (coalesce(meta, '{}'::jsonb) ? 'resolved_url')
+			           )
+			           or (
+			                $5
+			                and coalesce(meta->>'resolved_url_source', '') like '%/query_messages.json%'
+			           )
+			     )
 		     and (
 		           coalesce(meta, '{}'::jsonb) @> $3::jsonb
 		           or coalesce(meta, '{}'::jsonb) @> $4::jsonb
@@ -523,7 +537,7 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 		)
 		select distinct message_id
 		  from updated
-	`, imageURL, string(metaPatchRaw), string(fidFilterRaw), string(taggedURLRaw))
+	`, imageURL, string(metaPatchRaw), string(fidFilterRaw), string(taggedURLRaw), isDirectImageReference(sourceURL, imageURL))
 	if err != nil {
 		return 0, err
 	}
@@ -541,6 +555,71 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 		}
 	}
 	return count, rows.Err()
+}
+
+func isDirectImageReference(sourceURL string, imageURL string) bool {
+	return strings.TrimSpace(sourceURL) != "" && strings.TrimSpace(sourceURL) == strings.TrimSpace(imageURL)
+}
+
+func normalizeWeiboThumbnailURL(rawURL string, sourceURL string) string {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !strings.HasSuffix(parsed.Path, "/msget_thumbnail") {
+		return strings.TrimSpace(rawURL)
+	}
+	query := parsed.Query()
+	if query.Get("fid") == "" {
+		return strings.TrimSpace(rawURL)
+	}
+	source := query.Get("source")
+	if source == "" {
+		if sourceFromURL := sourceQueryValue(sourceURL); sourceFromURL != "" {
+			source = sourceFromURL
+		} else {
+			source = "209678993"
+		}
+		query.Set("source", source)
+	}
+	if query.Get("imageType") == "" {
+		query.Set("imageType", "origin")
+	}
+	if size := normalizedThumbnailSize(query.Get("size")); size != "" {
+		query.Set("size", size)
+		query.Set("width", "240")
+		query.Set("high", "240")
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func sourceQueryValue(rawURL string) string {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Query().Get("source"))
+}
+
+func normalizedThumbnailSize(size string) string {
+	parts := strings.Split(strings.TrimSpace(size), ",")
+	if len(parts) != 2 {
+		return ""
+	}
+	width, errW := strconv.Atoi(parts[0])
+	height, errH := strconv.Atoi(parts[1])
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return ""
+	}
+	if width <= 240 && height <= 240 {
+		return ""
+	}
+	if width >= height {
+		height = max(1, height*240/width)
+		width = 240
+	} else {
+		width = max(1, width*240/height)
+		height = 240
+	}
+	return fmt.Sprintf("%d,%d", width, height)
 }
 
 func (s *Store) GetMessageByDedupeKey(ctx context.Context, dedupeKey string) (Message, error) {
@@ -703,8 +782,7 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		conditions = append(conditions, "coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'")
 	}
 	if params.Query = strings.TrimSpace(params.Query); params.Query != "" {
-		placeholder := addArg("%" + params.Query + "%")
-		conditions = append(conditions, "(m.content ilike "+placeholder+" or m.weibo_message_id ilike "+placeholder+" or u.nickname ilike "+placeholder+")")
+		conditions = append(conditions, "lower(btrim(coalesce(m.content, ''))) = lower("+addArg(params.Query)+")")
 	}
 	if params.Since != nil {
 		conditions = append(conditions, "coalesce(m.sent_at, m.captured_at) >= "+addArg(*params.Since))
@@ -738,6 +816,7 @@ func queryMessages(ctx context.Context, db messageDB, includeRaw bool, whereSQL 
 		       m.sender_id,
 		       coalesce(u.weibo_user_id, ''),
 		       coalesce(u.nickname, ''),
+		       coalesce(u.avatar_url, ''),
 		       m.message_type,
 		       coalesce(m.content, ''),
 		       m.sent_at,
@@ -769,6 +848,7 @@ func queryMessages(ctx context.Context, db messageDB, includeRaw bool, whereSQL 
 			&message.SenderID,
 			&message.WeiboSenderID,
 			&message.SenderName,
+			&message.SenderAvatar,
 			&message.MessageType,
 			&message.Content,
 			&message.SentAt,
@@ -834,31 +914,43 @@ func attachmentsByMessageID(ctx context.Context, db messageDB, ids []int64) (map
 		); err != nil {
 			return nil, err
 		}
-		normalizeImageAttachmentURL(&attachment)
+		if isUnresolvedLegacyThumbnail(attachment) {
+			attachment.URL = ""
+		} else if strings.TrimSpace(attachment.URL) != "" {
+			attachment.URL = normalizeWeiboThumbnailURL(attachment.URL, attachmentResolvedSourceURL(attachment.Meta))
+		}
 		result[attachment.MessageID] = append(result[attachment.MessageID], attachment)
 	}
 	return result, rows.Err()
 }
 
-func normalizeImageAttachmentURL(attachment *Attachment) {
-	if attachment == nil || attachment.AttachmentType != "image" || strings.TrimSpace(attachment.URL) != "" {
-		return
+func attachmentResolvedSourceURL(meta json.RawMessage) string {
+	var value struct {
+		ResolvedURLSource string `json:"resolved_url_source"`
 	}
-	var meta struct {
-		FIDs []string `json:"fids"`
-	}
-	if err := json.Unmarshal(attachment.Meta, &meta); err != nil || len(meta.FIDs) == 0 {
-		return
-	}
-	attachment.URL = defaultWeiboThumbnailURL(meta.FIDs[0])
-}
-
-func defaultWeiboThumbnailURL(fid string) string {
-	fid = strings.TrimSpace(fid)
-	if fid == "" {
+	if json.Unmarshal(meta, &value) != nil {
 		return ""
 	}
-	return "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=" + neturl.QueryEscape(fid) + "&high=240&width=240&size=111,240&source=209678993&imageType=origin"
+	return value.ResolvedURLSource
+}
+
+func isLegacyDefaultThumbnailURL(rawURL string) bool {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !strings.HasSuffix(parsed.Path, "/msget_thumbnail") {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("size") == "111,240" && query.Get("width") == "240" && query.Get("high") == "240"
+}
+
+func isUnresolvedLegacyThumbnail(attachment Attachment) bool {
+	if !isLegacyDefaultThumbnailURL(attachment.URL) {
+		return false
+	}
+	var meta struct {
+		ResolvedURL string `json:"resolved_url"`
+	}
+	return json.Unmarshal(attachment.Meta, &meta) != nil || strings.TrimSpace(meta.ResolvedURL) == ""
 }
 
 func updateGroupLastMessageAt(ctx context.Context, db messageDB, groupID int64, sentAt *time.Time) error {

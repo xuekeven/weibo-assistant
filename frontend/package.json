@@ -9,14 +9,13 @@
     "preview": "vite preview --host 0.0.0.0 --port 6002"
   },
   "dependencies": {
-    "@nuxt/ui": "^4.6.1",
-    "@vitejs/plugin-vue": "^6.0.1",
-    "ant-design-vue": "^4.2.6",
-    "dayjs": "^1.11.21",
-    "tailwindcss": "^4.3.2",
-    "typescript": "^5.9.2",
-    "vite": "^7.0.5",
-    "vue": "^3.5.17",
-    "vue-tsc": "^3.0.1"
+    "@ant-design/icons-vue": "7.0.1",
+    "@vitejs/plugin-vue": "6.0.7",
+    "ant-design-vue": "4.2.6",
+    "dayjs": "1.11.21",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vue": "3.5.39",
+    "vue-tsc": "3.3.7"
   }
 }

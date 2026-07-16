@@ -128,17 +128,12 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 		// 接口按旧到新返回。倒序处理才能先保存断线后的新消息，再在连续的已知消息处停止。
 		for index := len(page.Messages) - 1; index >= 0; index-- {
 			message := page.Messages[index]
-			if stopMID != "" && message.WeiboMessageID == stopMID {
-				stopReason = "stop_mid_reached"
-				stop = true
-				break
-			}
 			exists, existedAtSnapshot, err := st.MessageExistenceAt(ctx, message.WeiboMessageID, job.CreatedAt)
 			if err != nil {
 				return err
 			}
-			if stopMID == "" && existedAtSnapshot {
-				stopReason = "existing_message_reached"
+			if reached, reason := historySyncBoundaryReached(stopMID, message.WeiboMessageID, existedAtSnapshot); reached {
+				stopReason = reason
 				stop = true
 				break
 			}
@@ -190,6 +185,16 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 		"stopReason", stopReason,
 	)
 	return nil
+}
+
+func historySyncBoundaryReached(stopMID string, messageMID string, existedAtSnapshot bool) (bool, string) {
+	if strings.TrimSpace(stopMID) != "" && strings.TrimSpace(messageMID) == strings.TrimSpace(stopMID) {
+		return true, "stop_mid_reached"
+	}
+	if existedAtSnapshot {
+		return true, "existing_message_reached"
+	}
+	return false, ""
 }
 
 func persistHistoryMessage(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, job store.HistorySyncJob, message browser.NetworkMessage) (bool, error) {
@@ -274,7 +279,7 @@ func enqueueStartupHistorySync(ctx context.Context, st *store.Store, group store
 	if group.ID <= 0 {
 		return fmt.Errorf("cannot enqueue startup history sync without a group")
 	}
-	stopMID, err := st.GetNewestMessageMID(ctx, group.ID)
+	stopMID, err := st.GetNewestHistoryBoundaryMID(ctx, group.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
@@ -294,7 +299,7 @@ func enqueueStartupHistorySync(ctx context.Context, st *store.Store, group store
 func recordHistoryDisconnect(ctx context.Context, st *store.Store, group store.Group, window *disconnectWindow) {
 	stopMID := ""
 	if group.ID > 0 {
-		value, err := st.GetNewestMessageMID(ctx, group.ID)
+		value, err := st.GetNewestHistoryBoundaryMID(ctx, group.ID)
 		if err == nil {
 			stopMID = value
 		} else if !errors.Is(err, pgx.ErrNoRows) {

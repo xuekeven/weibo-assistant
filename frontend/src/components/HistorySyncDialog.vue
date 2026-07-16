@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Button as AButton, DatePicker, TimePicker } from 'ant-design-vue'
+import { CloseOutlined } from '@ant-design/icons-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import 'dayjs/locale/zh-cn'
 
@@ -86,7 +86,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
         <div>
           <h3 id="history-dialog-title">消息回溯</h3>
         </div>
-        <UButton color="neutral" variant="ghost" icon="i-lucide-x" aria-label="关闭" @click="$emit('close')" />
+        <a-button type="text" aria-label="关闭" @click="$emit('close')"><CloseOutlined /></a-button>
       </header>
 
       <div class="history-form">
@@ -96,7 +96,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
             <small>会从最新消息向前同步，直到早于这个时间。</small>
           </span>
           <div class="history-date-time">
-            <DatePicker
+            <a-date-picker
               v-model:value="fromDate"
               class="history-date-picker"
               size="large"
@@ -104,7 +104,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
               placeholder="选择日期"
               :allow-clear="false"
             />
-            <TimePicker
+            <a-time-picker
               v-model:value="fromTime"
               class="history-time-picker"
               size="large"
@@ -120,7 +120,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
             <small>留空时保存从最新消息开始的回溯结果。</small>
           </span>
           <div class="history-date-time">
-            <DatePicker
+            <a-date-picker
               v-model:value="toDate"
               class="history-date-picker"
               size="large"
@@ -128,7 +128,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
               placeholder="不限制日期"
               allow-clear
             />
-            <TimePicker
+            <a-time-picker
               v-model:value="toTime"
               class="history-time-picker"
               size="large"
@@ -144,8 +144,8 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
       <p v-if="error" class="history-error" role="alert">{{ error }}</p>
 
       <footer>
-        <AButton size="large" class="history-footer-button" @click="$emit('close')">取消</AButton>
-        <AButton
+        <a-button size="large" class="history-footer-button" @click="$emit('close')">取消</a-button>
+        <a-button
           type="primary"
           size="large"
           class="history-footer-button primary"
@@ -154,7 +154,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
           @click="$emit('submit')"
         >
           开始回溯
-        </AButton>
+        </a-button>
       </footer>
     </section>
   </div>

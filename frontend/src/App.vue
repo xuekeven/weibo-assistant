@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { ArrowDownOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
 import HistorySyncDialog from './components/HistorySyncDialog.vue'
 import ManagementCenter, { type ManagementTab, type RuleForm } from './components/ManagementCenter.vue'
@@ -12,6 +13,7 @@ import {
   createNotificationRule,
   createRealtimeSocket,
   deleteNotificationRule,
+  getAppConfig,
   getMessage,
   getHistorySync,
   getReadiness,
@@ -41,6 +43,7 @@ const notifications = ref<NotificationEvent[]>([])
 const notificationRules = ref<NotificationRule[]>([])
 const outboxItems = ref<NotificationOutboxItem[]>([])
 const readiness = ref<Record<string, unknown>>({})
+const appConfig = ref({ targetSenderId: '' })
 const users = ref<User[]>([])
 const monitor = ref<MonitorStatus | null>(null)
 const selectedGroupId = ref<number | null>(null)
@@ -63,11 +66,12 @@ const historyTo = ref('')
 const historyJob = ref<HistorySyncJob | null>(null)
 const historySubmitting = ref(false)
 const historyError = ref('')
+const olderHistoryNotice = ref('')
 const ruleForm = ref<RuleForm>({ name: '', groupId: '', senderId: '', messageType: '', enabled: true })
 const editingRuleId = ref<number | null>(null)
 const panelError = ref('')
 const previewImageURL = ref('')
-const monitorExpanded = ref(false)
+const monitorExpanded = ref(true)
 const mobileSidebarOpen = ref(false)
 const sidebarWidth = ref(280)
 const unreadByGroup = ref<Record<number, number>>({})
@@ -77,6 +81,13 @@ const messageListRef = ref<HTMLElement | null>(null)
 const realtimeStatus = ref('connecting')
 const currentTime = ref(new Date())
 const allSelectValue = '__all__'
+const antTheme = {
+  token: {
+    colorPrimary: '#17785d',
+    borderRadius: 7,
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+  }
+}
 
 const timeRangeOptions = [
   { value: 'all', label: '全部时间' },
@@ -86,10 +97,17 @@ const timeRangeOptions = [
   { value: 'custom', label: '指定日期以后' }
 ]
 
-const senderOptions = computed(() => [
-  { label: '全部发送人', value: allSelectValue },
-  ...users.value.filter((user) => user.weiboUserId).map((user) => ({ label: user.nickname || '未命名用户', value: user.weiboUserId || '' }))
-])
+const senderOptions = computed(() => {
+  const targetSenderId = appConfig.value.targetSenderId.trim()
+  const options = [
+    { label: '全部发送人', value: allSelectValue },
+    ...users.value.filter((user) => user.weiboUserId).map((user) => ({ label: user.nickname || '未命名用户', value: user.weiboUserId || '' }))
+  ]
+  if (targetSenderId && !options.some((option) => option.value === targetSenderId)) {
+    options.push({ label: `关注用户（${targetSenderId}）`, value: targetSenderId })
+  }
+  return options
+})
 
 // Reka UI 不允许 SelectItem 使用空字符串作为 value。界面层用哨兵值表示
 // “全部”，读写业务状态时再转换回空字符串，避免影响 API 查询参数。
@@ -141,6 +159,7 @@ let refreshAgain = false
 let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let clockTimer: number | undefined
+let keywordSearchTimer: number | undefined
 let stopped = false
 let lastAutoHistoryBoundary = ''
 
@@ -182,6 +201,11 @@ const monitorLabel = computed(() => {
   return monitorStatusLabels[status] || (status ? `状态：${status}` : '状态未知')
 })
 
+const monitorAlertMessage = computed(() => {
+  if (monitor.value?.lastError) return monitor.value.lastError
+  return '开发环境请查看运行 monitor 命令的终端日志；systemd 部署时查看 weibo-assistant-monitor.service。'
+})
+
 const monitorStatusTooltip = computed(() => {
   return `共 ${monitorStatusItems.length} 种状态`
 })
@@ -206,6 +230,16 @@ const hasActiveFilters = computed(() => {
 })
 
 const historySyncActive = computed(() => historyJob.value?.status === 'pending' || historyJob.value?.status === 'running')
+const historySyncProgressing = computed(() => historySyncActive.value && monitorIsFresh.value && !monitor.value?.lastError)
+const historySyncBlocked = computed(() => historySyncActive.value && !historySyncProgressing.value)
+const loadOlderLabel = computed(() => {
+  if (historySyncActive.value) {
+    return historySyncBlocked.value ? `回溯已暂停（已扫描 ${historyJob.value?.pagesFetched || 0} 页）` : `正在回溯消息（${historyJob.value?.pagesFetched || 0} 页）`
+  }
+  if (loadingOlder.value) return '正在加载…'
+  if (olderHistoryNotice.value) return olderHistoryNotice.value
+  return hasOlderMessages.value ? '加载更早消息' : '请求回溯更早消息'
+})
 
 const activeFilterLabels = computed(() => {
   const labels: Array<{ key: string; label: string }> = []
@@ -278,14 +312,15 @@ async function refreshAll() {
 async function runRefresh() {
   error.value = ''
   const shouldFollow = autoFollowMessages.value || messages.value.length === 0
-  const [groupResult, statusResult, notificationResult, userResult, ruleResult, outboxResult, readinessResult] = await Promise.all([
+  const [groupResult, statusResult, notificationResult, userResult, ruleResult, outboxResult, readinessResult, configResult] = await Promise.all([
     listGroups(),
     getMonitorStatus(),
     listNotificationEvents(),
     listUsers(),
     listNotificationRules(),
     listNotificationOutbox(),
-    getReadiness()
+    getReadiness(),
+    getAppConfig()
   ])
 
   groups.value = (groupResult.items || []).map(sanitizeGroup)
@@ -295,6 +330,7 @@ async function runRefresh() {
   notificationRules.value = ruleResult.items || []
   outboxItems.value = outboxResult.items || []
   readiness.value = readinessResult
+  appConfig.value = { targetSenderId: configResult.targetSenderId || '' }
 
   if (!selectedGroupId.value && visibleGroups.value.length > 0) {
     selectedGroupId.value = visibleGroups.value[0].id
@@ -345,6 +381,17 @@ async function applyFilters() {
   }
 }
 
+async function applySenderFilter() {
+  await applyFilters()
+}
+
+async function viewTargetSender() {
+  const targetSenderId = appConfig.value.targetSenderId.trim()
+  if (!targetSenderId) return
+  selectedSenderId.value = targetSenderId
+  await applyFilters()
+}
+
 async function clearFilters() {
   query.value = ''
   selectedSenderId.value = ''
@@ -384,8 +431,8 @@ function messageMatchesCurrentFilters(message: Message) {
   if (since && new Date(message.sentAt || message.capturedAt).getTime() < new Date(since).getTime()) return false
   const keyword = query.value.trim().toLowerCase()
   if (keyword) {
-    const haystack = `${message.content || ''} ${message.weiboMessageId || ''} ${message.senderName || ''}`.toLowerCase()
-    if (!haystack.includes(keyword)) return false
+    const haystack = (message.content || '').trim().toLowerCase()
+    if (haystack !== keyword) return false
   }
   return true
 }
@@ -491,8 +538,11 @@ function handleRealtimeEvent(event: RealtimeEvent) {
     const previousStatus = historyJob.value?.status
     historyJob.value = event.historySyncJob
     if (event.historySyncJob.status === 'completed' && previousStatus !== 'completed' && event.historySyncJob.messagesInserted > 0) {
+      olderHistoryNotice.value = ''
       hasOlderMessages.value = true
       void loadOlderMessages(false)
+    } else if (event.historySyncJob.status === 'completed') {
+      olderHistoryNotice.value = '没有新增更早消息'
     }
   }
 }
@@ -581,8 +631,15 @@ function updateDocumentTitle() {
 
 async function loadOlderMessages(triggerRemote = true) {
   if (loadingOlder.value || messages.value.length === 0) return
+  olderHistoryNotice.value = ''
   if (!hasOlderMessages.value) {
-    if (triggerRemote) await requestOlderHistoryPage()
+    if (!triggerRemote) return
+    loadingOlder.value = true
+    try {
+      await requestOlderHistoryPage()
+    } finally {
+      loadingOlder.value = false
+    }
     return
   }
   const element = messageListRef.value
@@ -616,13 +673,32 @@ async function loadOlderMessages(triggerRemote = true) {
 }
 
 async function requestOlderHistoryPage() {
-  if (!selectedGroupId.value || historySyncActive.value || hasActiveFilters.value) return
+  if (!selectedGroupId.value) {
+    olderHistoryNotice.value = '请先选择群聊'
+    return
+  }
+  if (historySyncActive.value) {
+    olderHistoryNotice.value = '已有回溯任务'
+    return
+  }
+  if (hasActiveFilters.value) {
+    olderHistoryNotice.value = '清空筛选后回溯'
+    return
+  }
   const oldest = orderedMessages.value[0]
   const boundary = oldest?.weiboMessageId || String(oldest?.id || '')
-  if (!boundary || boundary === lastAutoHistoryBoundary) return
+  if (!boundary) {
+    olderHistoryNotice.value = '暂无可回溯边界'
+    return
+  }
+  if (boundary === lastAutoHistoryBoundary) {
+    olderHistoryNotice.value = '已请求回溯'
+    return
+  }
   lastAutoHistoryBoundary = boundary
   try {
     historyJob.value = await createHistorySync(selectedGroupId.value, { pages: 1 })
+    olderHistoryNotice.value = '已请求回溯'
   } catch (err) {
     lastAutoHistoryBoundary = ''
     error.value = err instanceof Error ? err.message : String(err)
@@ -794,6 +870,13 @@ function toggleManagementCenter() {
   showNotifications.value = !showNotifications.value
 }
 
+watch(query, () => {
+  window.clearTimeout(keywordSearchTimer)
+  keywordSearchTimer = window.setTimeout(() => {
+    void applyFilters()
+  }, 300)
+})
+
 onMounted(() => {
   clockTimer = window.setInterval(() => {
     currentTime.value = new Date()
@@ -806,19 +889,18 @@ onUnmounted(() => {
   stopped = true
   if (reconnectTimer) window.clearTimeout(reconnectTimer)
   if (clockTimer) window.clearInterval(clockTimer)
+  window.clearTimeout(keywordSearchTimer)
   socket?.close()
 })
 </script>
 
 <template>
-  <!-- 当前界面没有使用 Toast。独立 Vue + Vite 模式下关闭默认 Toaster，
-       避免时钟刷新触发 ToastProvider 的 emitsOptions 空指针。 -->
-  <UApp :toaster="null">
+  <a-config-provider :theme="antTheme">
     <main
-    class="app-shell"
-    :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen }"
-    :style="{ '--sidebar-width': `${sidebarWidth}px` }"
-  >
+      class="app-shell"
+      :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen }"
+      :style="{ '--sidebar-width': `${sidebarWidth}px` }"
+    >
     <div v-if="mobileSidebarOpen" class="mobile-sidebar-backdrop" @click="mobileSidebarOpen = false"></div>
     <GroupSidebar
       v-model:group-query="groupQuery"
@@ -841,22 +923,18 @@ onUnmounted(() => {
     <section class="chat-pane">
       <header class="chat-head">
         <div>
-          <UButton class="mobile-menu-button" color="neutral" variant="outline" icon="i-lucide-menu" aria-label="打开群聊列表" @click="openMobileSidebar" />
+          <a-button class="mobile-menu-button" aria-label="打开群聊列表" @click="openMobileSidebar"><MenuOutlined /></a-button>
           <h2>{{ selectedGroup?.name || '消息流' }}</h2>
         </div>
         <div class="head-actions">
-          <UButton
-            color="neutral"
-            variant="outline"
-            icon="i-lucide-history"
-            :label="historySyncActive ? '回溯中' : '消息回溯'"
-            :loading="historySyncActive"
+          <a-button
+            :loading="historySyncProgressing"
             :disabled="!selectedGroup || historySyncActive"
             @click="openHistoryDialog"
-          />
-          <UButton color="neutral" variant="outline" icon="i-lucide-panels-top-left" label="管理中心" @click="toggleManagementCenter">
-            <template v-if="actionableNotificationCount" #trailing><UBadge color="error" size="sm">{{ actionableNotificationCount }}</UBadge></template>
-          </UButton>
+          ><HistoryOutlined />{{ historySyncActive ? (historySyncProgressing ? '回溯中' : '回溯暂停') : '消息回溯' }}</a-button>
+          <a-badge :count="actionableNotificationCount" :overflow-count="99">
+            <a-button @click="toggleManagementCenter"><NotificationOutlined />管理中心</a-button>
+          </a-badge>
         </div>
       </header>
 
@@ -875,14 +953,17 @@ onUnmounted(() => {
         :active-filters="activeFilterLabels"
         :loading="messagesLoading"
         :has-active-filters="hasActiveFilters"
+        :can-view-target-sender="Boolean(appConfig.targetSenderId)"
         @apply="applyFilters"
+        @sender-change="applySenderFilter"
+        @view-target-sender="viewTargetSender"
         @clear="clearFilters"
         @clear-filter="clearFilter"
       />
 
       <div v-if="monitor && (!monitorIsFresh || monitor.lastError)" class="monitor-alert" role="alert">
         <strong>{{ monitorIsFresh ? '监控报告了异常' : '监控心跳已过期' }}</strong>
-        <span>{{ monitor.lastError || '请检查 weibo-assistant-monitor.service 的状态和日志。' }}</span>
+        <span>{{ monitorAlertMessage }}</span>
       </div>
 
       <div v-if="error" class="error-line" role="alert">
@@ -900,12 +981,12 @@ onUnmounted(() => {
           </div>
 
           <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="loadingOlder || historySyncActive" @click="loadOlderMessages()">
-            {{ historySyncActive ? `正在回溯消息（${historyJob?.pagesFetched || 0} 页）` : loadingOlder ? '正在加载…' : hasOlderMessages ? '加载更早消息' : '回溯更早消息' }}
+            {{ loadOlderLabel }}
           </button>
 
           <div v-if="messagesLoading && orderedMessages.length === 0" class="message-skeletons" aria-label="正在加载消息">
             <div v-for="index in 5" :key="index" class="message-skeleton" :class="{ short: index % 2 === 0 }">
-              <USkeleton class="skeleton-avatar" /><div><USkeleton class="skeleton-meta" /><USkeleton class="skeleton-bubble" /></div>
+              <a-skeleton-avatar active class="skeleton-avatar" /><div><a-skeleton-input active class="skeleton-meta" /><a-skeleton-input active class="skeleton-bubble" /></div>
             </div>
           </div>
 
@@ -936,7 +1017,7 @@ onUnmounted(() => {
         @click="scrollMessagesToBottom"
       >
         <span>{{ newMessageCount > 0 ? `${newMessageCount} 条新消息` : '回到底部' }}</span>
-        <UIcon name="i-lucide-arrow-down" class="jump-bottom-icon" aria-hidden="true" />
+        <ArrowDownOutlined class="jump-bottom-icon" aria-hidden="true" />
       </button>
     </section>
 
@@ -965,6 +1046,7 @@ onUnmounted(() => {
       :selected-group="selectedGroup"
       :history-job="historyJob"
       :history-sync-active="historySyncActive"
+      :history-sync-progressing="historySyncProgressing"
       @close="showNotifications = false"
       @retry-all="retryAllFailedJobs"
       @retry="retryJob"
@@ -990,5 +1072,5 @@ onUnmounted(() => {
       <img :src="previewImageURL" alt="微博图片预览" @click.stop />
     </div>
     </main>
-  </UApp>
+  </a-config-provider>
 </template>

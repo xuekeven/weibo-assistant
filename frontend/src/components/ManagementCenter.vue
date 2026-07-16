@@ -1,4 +1,16 @@
 <script setup lang="ts">
+import {
+  AlertOutlined,
+  BarChartOutlined,
+  BellOutlined,
+  CloseOutlined,
+  FileMarkdownOutlined,
+  FileTextOutlined,
+  HistoryOutlined,
+  MessageOutlined,
+  ProfileOutlined,
+  TeamOutlined
+} from '@ant-design/icons-vue'
 import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule, User } from '../api'
 import { formatTime, notificationLabel } from '../utils/presentation'
 
@@ -18,6 +30,7 @@ defineProps<{
   selectedGroup: Group | null
   historyJob: HistorySyncJob | null
   historySyncActive: boolean
+  historySyncProgressing: boolean
 }>()
 
 const tab = defineModel<ManagementTab>('tab', { required: true })
@@ -34,13 +47,6 @@ defineEmits<{
   openHistory: []
 }>()
 
-const tabs = [
-  { value: 'notifications', label: '通知', icon: 'i-lucide-bell' },
-  { value: 'rules', label: '规则', icon: 'i-lucide-list-checks' },
-  { value: 'history', label: '回溯', icon: 'i-lucide-history' },
-  { value: 'stats', label: '统计', icon: 'i-lucide-chart-no-axes-column' }
-]
-
 function statShare(value: number, entries: [string, number][]) {
   const maximum = Math.max(1, ...entries.map((entry) => entry[1]))
   return `${Math.max(4, Math.round((value / maximum) * 100))}%`
@@ -50,11 +56,17 @@ function messageTypeLabel(type: string) {
   return ({ text: '文本', image: '图片', system: '系统消息', recall: '撤回', unknown: '其他' } as Record<string, string>)[type] || type
 }
 
-function historyJobLabel(job: HistorySyncJob) {
+function historyJobLabel(job: HistorySyncJob, progressing: boolean) {
   if (job.status === 'pending') return '等待 monitor 执行'
-  if (job.status === 'running') return '正在回溯消息'
+  if (job.status === 'running') return progressing ? '正在回溯消息' : '回溯已暂停，等待 monitor 恢复'
   if (job.status === 'completed') return '上次回溯已完成'
   return '上次回溯失败'
+}
+
+function historyJobBadge(job: HistorySyncJob, progressing: boolean) {
+  if (job.status === 'failed') return '失败'
+  if (job.status === 'completed') return '完成'
+  return progressing ? '进行中' : '已暂停'
 }
 
 function historyModeLabel(mode: HistorySyncJob['mode']) {
@@ -65,8 +77,18 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
 <template>
   <div class="notify-backdrop" @click="$emit('close')"></div>
   <aside class="notify-pane control-center">
-    <div class="pane-head"><div><h2>管理中心</h2><p>通知、规则与统计</p></div><button class="icon-button" type="button" title="关闭" @click="$emit('close')">×</button></div>
-    <UTabs v-model="tab" :items="tabs" :content="false" class="panel-tabs" aria-label="管理中心栏目" />
+    <div class="pane-head">
+      <h2>管理中心</h2>
+      <a-button class="panel-close-button" aria-label="关闭管理中心" @click="$emit('close')"><CloseOutlined /></a-button>
+    </div>
+    <div class="panel-tabs-wrap">
+      <a-radio-group v-model:value="tab" class="panel-tabs" button-style="solid" aria-label="管理中心栏目">
+        <a-radio-button value="notifications"><BellOutlined />通知</a-radio-button>
+        <a-radio-button value="rules"><ProfileOutlined />规则</a-radio-button>
+        <a-radio-button value="history"><HistoryOutlined />回溯</a-radio-button>
+        <a-radio-button value="stats"><BarChartOutlined />统计</a-radio-button>
+      </a-radio-group>
+    </div>
 
     <div v-if="tab === 'notifications'" class="panel-content notify-list">
       <button v-if="actionableCount" class="retry-all" type="button" @click="$emit('retryAll')">重试全部失败任务</button>
@@ -112,17 +134,17 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
           <p>{{ selectedGroup ? '可以从这里查看回溯进度，也可以发起一次新的消息回溯。' : '请先在左侧选择一个群聊，再发起消息回溯。' }}</p>
         </div>
         <button class="primary-action history-panel-action" type="button" :disabled="!selectedGroup || historySyncActive" @click="$emit('openHistory')">
-          {{ historySyncActive ? '回溯中' : '发起消息回溯' }}
+          {{ historySyncActive ? (historySyncProgressing ? '回溯中' : '回溯暂停') : '发起消息回溯' }}
         </button>
       </section>
 
-      <section v-if="historyJob" class="history-job-card" :class="historyJob.status">
+      <section v-if="historyJob" class="history-job-card" :class="[historyJob.status, { paused: historySyncActive && !historySyncProgressing }]">
         <div class="history-job-card-head">
           <div>
             <span>{{ historyModeLabel(historyJob.mode) }}</span>
-            <h3>{{ historyJobLabel(historyJob) }}</h3>
+            <h3>{{ historyJobLabel(historyJob, historySyncProgressing) }}</h3>
           </div>
-          <strong>{{ historyJob.status === 'failed' ? '失败' : historyJob.status === 'completed' ? '完成' : '进行中' }}</strong>
+          <strong>{{ historyJobBadge(historyJob, historySyncProgressing) }}</strong>
         </div>
 
         <div class="history-job-metrics">
@@ -142,7 +164,7 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
       </section>
 
       <div v-else class="panel-empty history-empty">
-        <UIcon name="i-lucide-history" />
+        <HistoryOutlined />
         <strong>暂无回溯任务</strong>
         <span>{{ selectedGroup ? '点击“发起消息回溯”后，这里会显示执行进度和结果。' : '选择群聊后，可以查看或发起该群聊的消息回溯。' }}</span>
       </div>
@@ -150,10 +172,10 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
 
     <div v-else class="panel-content stats-panel">
       <div class="stat-grid">
-        <article class="stat-card messages"><span class="stat-icon"><UIcon name="i-lucide-message-square-text" /></span><div><strong>{{ messageStats.total }}</strong><span>当前结果消息</span></div></article>
-        <article class="stat-card senders"><span class="stat-icon"><UIcon name="i-lucide-users" /></span><div><strong>{{ messageStats.senders.length }}</strong><span>活跃发送人</span></div></article>
-        <article class="stat-card rules"><span class="stat-icon"><UIcon name="i-lucide-list-checks" /></span><div><strong>{{ notificationRules.length }}</strong><span>通知规则</span></div></article>
-        <article class="stat-card failures"><span class="stat-icon"><UIcon name="i-lucide-circle-alert" /></span><div><strong>{{ actionableCount }}</strong><span>失败通知</span></div></article>
+        <article class="stat-card messages"><span class="stat-icon"><MessageOutlined /></span><div><strong>{{ messageStats.total }}</strong><span>当前结果消息</span></div></article>
+        <article class="stat-card senders"><span class="stat-icon"><TeamOutlined /></span><div><strong>{{ messageStats.senders.length }}</strong><span>活跃发送人</span></div></article>
+        <article class="stat-card rules"><span class="stat-icon"><ProfileOutlined /></span><div><strong>{{ notificationRules.length }}</strong><span>通知规则</span></div></article>
+        <article class="stat-card failures"><span class="stat-icon"><AlertOutlined /></span><div><strong>{{ actionableCount }}</strong><span>失败通知</span></div></article>
       </div>
 
       <section class="stats-section">
@@ -181,9 +203,9 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
       <section class="stats-section export-section">
         <div class="stats-section-head"><h3>导出当前结果</h3></div>
         <div class="export-actions">
-          <button type="button" @click="$emit('export', 'csv')"><UIcon name="i-lucide-sheet" /><span>CSV</span></button>
-          <button type="button" @click="$emit('export', 'json')"><UIcon name="i-lucide-braces" /><span>JSON</span></button>
-          <button type="button" @click="$emit('export', 'md')"><UIcon name="i-lucide-file-text" /><span>Markdown</span></button>
+          <button type="button" @click="$emit('export', 'csv')"><FileTextOutlined /><span>CSV</span></button>
+          <button type="button" @click="$emit('export', 'json')"><ProfileOutlined /><span>JSON</span></button>
+          <button type="button" @click="$emit('export', 'md')"><FileMarkdownOutlined /><span>Markdown</span></button>
         </div>
       </section>
     </div>

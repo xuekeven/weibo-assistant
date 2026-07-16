@@ -105,9 +105,8 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 		t.Fatalf("expected 1 attachment, got %d", len(message.Attachments))
 	}
 	attachment := message.Attachments[0]
-	expectedURL := "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=5318460894348385&high=240&width=240&size=111,240&source=209678993&imageType=origin"
-	if attachment.URL != expectedURL {
-		t.Fatalf("unexpected generated image URL: %q", attachment.URL)
+	if attachment.URL != "" {
+		t.Fatalf("image URL must wait for the real Weibo thumbnail dimensions, got %q", attachment.URL)
 	}
 
 	var meta struct {
@@ -120,7 +119,7 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 	if len(meta.FIDs) != 1 || meta.FIDs[0] != "5318460894348385" {
 		t.Fatalf("unexpected fids: %#v", meta.FIDs)
 	}
-	if meta.URLStatus != "" {
+	if meta.URLStatus != "missing_in_websocket_payload" {
 		t.Fatalf("unexpected url status: %q", meta.URLStatus)
 	}
 }
@@ -273,6 +272,54 @@ func TestExtractImageReferencesFromBody(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected fid/image URL pair, got %#v", refs)
+	}
+}
+
+func TestExtractImageReferencesFromBodyDoesNotPairSiblingMessages(t *testing.T) {
+	body := `{
+		"data": {
+			"messages": [
+				{
+					"fids": ["5320938923230262"],
+					"pics": [{"url": "https://wx1.sinaimg.cn/large/nuts.jpg"}]
+				},
+				{
+					"fids": ["5320938924000000"],
+					"pics": [{"url": "https://ww1.sinaimg.cn/large/sunset.jpg"}]
+				}
+			]
+		}
+	}`
+
+	refs := extractImageReferencesFromBody(body, "https://api.weibo.com/webim/groupchat/query_messages.json")
+	for _, ref := range refs {
+		for _, fid := range ref.FIDs {
+			for _, imageURL := range ref.URLs {
+				if fid == "5320938923230262" && imageURL == "https://ww1.sinaimg.cn/large/sunset.jpg" {
+					t.Fatalf("target fid was paired with a sibling message image: %#v", refs)
+				}
+				if fid == "5320938924000000" && imageURL == "https://wx1.sinaimg.cn/large/nuts.jpg" {
+					t.Fatalf("sibling fid was paired with the target image: %#v", refs)
+				}
+			}
+		}
+	}
+
+	wantPairs := map[string]string{
+		"5320938923230262": "https://wx1.sinaimg.cn/large/nuts.jpg",
+		"5320938924000000": "https://ww1.sinaimg.cn/large/sunset.jpg",
+	}
+	for fid, wantURL := range wantPairs {
+		found := false
+		for _, ref := range refs {
+			if len(ref.FIDs) == 1 && ref.FIDs[0] == fid && len(ref.URLs) == 1 && ref.URLs[0] == wantURL {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing local fid/image pair %s -> %s in %#v", fid, wantURL, refs)
+		}
 	}
 }
 
