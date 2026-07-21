@@ -3,51 +3,95 @@ import {
   AlertOutlined,
   BarChartOutlined,
   BellOutlined,
+  CalendarOutlined,
   CloseOutlined,
   FileMarkdownOutlined,
   FileTextOutlined,
   HistoryOutlined,
   MessageOutlined,
-  ProfileOutlined,
-  TeamOutlined
+  ProfileOutlined
 } from '@ant-design/icons-vue'
+import { computed, ref } from 'vue'
+import dayjs, { type Dayjs } from 'dayjs'
 import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule } from '../api'
+import type { DailyMessageStats, MessageExportFormat } from '../api'
 import { formatTime, notificationLabel } from '../utils/presentation'
 
 export type ManagementTab = 'notifications' | 'rules' | 'history' | 'stats'
 export type RuleForm = { name: string; groupId: string; senderId: string; messageType: string; enabled: boolean }
-export type MessageStats = { total: number; senders: [string, number][]; types: [string, number][] }
+export type MessageExportRequest = { format: MessageExportFormat; since: string; before: string; filename: string }
 
 defineProps<{
   outboxItems: NotificationOutboxItem[]
   notificationRules: NotificationRule[]
   actionableCount: number
-  messageStats: MessageStats
+  dailyMessageStats: DailyMessageStats
   selectedGroup: Group | null
   historyJob: HistorySyncJob | null
   historySyncActive: boolean
   historySyncProgressing: boolean
+  exporting: boolean
+  exportError: string
 }>()
 
 const tab = defineModel<ManagementTab>('tab', { required: true })
-defineEmits<{
+const emit = defineEmits<{
   close: []
   retryAll: []
   retry: [item: NotificationOutboxItem]
   openRule: []
   editRule: [rule: NotificationRule]
   removeRule: [rule: NotificationRule]
-  export: [format: 'csv' | 'json' | 'md']
+  export: [request: MessageExportRequest]
   openHistory: []
 }>()
 
-function statShare(value: number, entries: [string, number][]) {
-  const maximum = Math.max(1, ...entries.map((entry) => entry[1]))
-  return `${Math.max(4, Math.round((value / maximum) * 100))}%`
+const exportMode = ref<'day' | 'range'>('day')
+const exportDay = ref<Dayjs>(dayjs())
+const exportStart = ref<Dayjs>(dayjs().subtract(6, 'day'))
+const exportEnd = ref<Dayjs>(dayjs())
+const exportRangeValid = computed(() => exportMode.value === 'day' || !exportStart.value.isAfter(exportEnd.value, 'day'))
+
+function setExportDay(dayOffset: number) {
+  exportDay.value = dayjs().add(dayOffset, 'day').startOf('day')
 }
 
-function messageTypeLabel(type: string) {
-  return ({ text: '文本', image: '图片', video: '视频', system: '系统消息', recall: '撤回', unknown: '其他' } as Record<string, string>)[type] || type
+function setExportRange(preset: 'week' | 'month') {
+  const today = dayjs().startOf('day')
+  if (preset === 'week') {
+    const daysSinceMonday = (today.day() + 6) % 7
+    exportStart.value = today.subtract(daysSinceMonday, 'day')
+  } else {
+    exportStart.value = today.startOf('month')
+  }
+  exportEnd.value = today
+}
+
+function isExportDay(dayOffset: number) {
+  return exportDay.value.isSame(dayjs().add(dayOffset, 'day'), 'day')
+}
+
+function isExportRange(preset: 'week' | 'month') {
+  const today = dayjs().startOf('day')
+  const expectedStart = preset === 'week'
+    ? today.subtract((today.day() + 6) % 7, 'day')
+    : today.startOf('month')
+  return exportStart.value.isSame(expectedStart, 'day') && exportEnd.value.isSame(today, 'day')
+}
+
+function requestExport(format: MessageExportFormat) {
+  if (!exportRangeValid.value) return
+  const start = (exportMode.value === 'day' ? exportDay.value : exportStart.value).startOf('day')
+  const end = (exportMode.value === 'day' ? exportDay.value : exportEnd.value).add(1, 'day').startOf('day')
+  const rangeLabel = exportMode.value === 'day'
+    ? start.format('YYYY-MM-DD')
+    : `${start.format('YYYY-MM-DD')}-to-${end.subtract(1, 'day').format('YYYY-MM-DD')}`
+  emit('export', {
+    format,
+    since: start.toDate().toISOString(),
+    before: end.toDate().toISOString(),
+    filename: `weibo-messages-${rangeLabel}.${format}`
+  })
 }
 
 function historyJobLabel(job: HistorySyncJob, progressing: boolean) {
@@ -165,40 +209,47 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
 
     <div v-else class="panel-content stats-panel">
       <div class="stat-grid">
-        <article class="stat-card messages"><span class="stat-icon"><MessageOutlined /></span><div><strong>{{ messageStats.total }}</strong><span>当前结果消息</span></div></article>
-        <article class="stat-card senders"><span class="stat-icon"><TeamOutlined /></span><div><strong>{{ messageStats.senders.length }}</strong><span>活跃发送人</span></div></article>
+        <article class="stat-card messages"><span class="stat-icon"><MessageOutlined /></span><div><strong>{{ dailyMessageStats.today }}</strong><span>今日消息数</span></div></article>
+        <article class="stat-card yesterday"><span class="stat-icon"><CalendarOutlined /></span><div><strong>{{ dailyMessageStats.yesterday }}</strong><span>昨日消息数</span></div></article>
         <article class="stat-card rules"><span class="stat-icon"><ProfileOutlined /></span><div><strong>{{ notificationRules.length }}</strong><span>通知规则</span></div></article>
         <article class="stat-card failures"><span class="stat-icon"><AlertOutlined /></span><div><strong>{{ actionableCount }}</strong><span>失败通知</span></div></article>
       </div>
 
-      <section class="stats-section">
-        <div class="stats-section-head"><h3>活跃发送人</h3><span>{{ messageStats.senders.length }} 人</span></div>
-        <ol v-if="messageStats.senders.length" class="stats-ranking">
-          <li v-for="entry in messageStats.senders" :key="entry[0]">
-            <div class="stats-rank-line"><span :title="entry[0]">{{ entry[0] }}</span><strong>{{ entry[1] }}</strong></div>
-            <div class="stats-track"><span :style="{ width: statShare(entry[1], messageStats.senders) }"></span></div>
-          </li>
-        </ol>
-        <p v-else class="stats-empty">当前结果中暂无发送人</p>
-      </section>
-
-      <section class="stats-section">
-        <div class="stats-section-head"><h3>消息类型</h3><span>{{ messageStats.types.length }} 类</span></div>
-        <div v-if="messageStats.types.length" class="stats-types">
-          <div v-for="entry in messageStats.types" :key="entry[0]" class="stats-type-row">
-            <div class="stats-rank-line"><span>{{ messageTypeLabel(entry[0]) }}</span><strong>{{ entry[1] }}</strong></div>
-            <div class="stats-track type-track"><span :style="{ width: statShare(entry[1], messageStats.types) }"></span></div>
-          </div>
-        </div>
-        <p v-else class="stats-empty">当前结果中暂无消息</p>
-      </section>
-
       <section class="stats-section export-section">
-        <div class="stats-section-head"><h3>导出当前结果</h3></div>
+        <div class="stats-section-head"><h3>导出消息</h3></div>
+        <div class="export-form">
+          <div class="export-field">
+            <span>导出范围</span>
+            <a-radio-group v-model:value="exportMode" class="export-mode-radios" aria-label="导出范围">
+              <a-radio value="day">导出单天</a-radio>
+              <a-radio value="range">导出区间</a-radio>
+            </a-radio-group>
+          </div>
+          <div v-if="exportMode === 'day'" class="export-field">
+            <span>日期</span>
+            <a-date-picker v-model:value="exportDay" size="large" format="YYYY-MM-DD" :allow-clear="false" />
+            <div class="export-presets" aria-label="单天快捷日期">
+              <button type="button" :class="{ active: isExportDay(0) }" :aria-pressed="isExportDay(0)" @click="setExportDay(0)">今日</button>
+              <button type="button" :class="{ active: isExportDay(-1) }" :aria-pressed="isExportDay(-1)" @click="setExportDay(-1)">昨日</button>
+            </div>
+          </div>
+          <template v-else>
+            <div class="export-date-range">
+              <label class="export-field"><span>开始日期</span><a-date-picker v-model:value="exportStart" size="large" format="YYYY-MM-DD" :allow-clear="false" /></label>
+              <label class="export-field"><span>结束日期</span><a-date-picker v-model:value="exportEnd" size="large" format="YYYY-MM-DD" :allow-clear="false" /></label>
+            </div>
+            <div class="export-presets" aria-label="区间快捷日期">
+              <button type="button" :class="{ active: isExportRange('week') }" :aria-pressed="isExportRange('week')" @click="setExportRange('week')">本周</button>
+              <button type="button" :class="{ active: isExportRange('month') }" :aria-pressed="isExportRange('month')" @click="setExportRange('month')">本月</button>
+            </div>
+          </template>
+          <p v-if="!exportRangeValid" class="export-error">开始日期不能晚于结束日期。</p>
+          <p v-else-if="exportError" class="export-error">{{ exportError }}</p>
+        </div>
         <div class="export-actions">
-          <button type="button" @click="$emit('export', 'csv')"><FileTextOutlined /><span>CSV</span></button>
-          <button type="button" @click="$emit('export', 'json')"><ProfileOutlined /><span>JSON</span></button>
-          <button type="button" @click="$emit('export', 'md')"><FileMarkdownOutlined /><span>Markdown</span></button>
+          <button type="button" :disabled="exporting || !exportRangeValid" @click="requestExport('csv')"><FileTextOutlined /><span>导出CSV</span></button>
+          <button type="button" :disabled="exporting || !exportRangeValid" @click="requestExport('json')"><ProfileOutlined /><span>导出JSON</span></button>
+          <button type="button" :disabled="exporting || !exportRangeValid" @click="requestExport('md')"><FileMarkdownOutlined /><span>导出Markdown</span></button>
         </div>
       </section>
     </div>

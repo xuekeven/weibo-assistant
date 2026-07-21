@@ -34,7 +34,7 @@ defineEmits<{
         <p>{{ groupQuery ? `${visibleGroups.length}/${groups.length}` : visibleGroups.length }} 个群聊</p>
       </div>
       <div class="pane-actions">
-        <a-button size="small" aria-label="刷新全部数据" :loading="loading" :disabled="loading" @click="$emit('refresh')"><ReloadOutlined /></a-button>
+        <a-button size="small" aria-label="刷新全部数据" :aria-busy="loading" :disabled="loading" @click="$emit('refresh')"><ReloadOutlined :spin="loading" /></a-button>
       </div>
     </div>
 

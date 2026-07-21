@@ -3,7 +3,7 @@ import { ArrowDownOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
 import HistorySyncDialog from './components/HistorySyncDialog.vue'
-import ManagementCenter, { type ManagementTab, type RuleForm } from './components/ManagementCenter.vue'
+import ManagementCenter, { type ManagementTab, type MessageExportRequest, type RuleForm } from './components/ManagementCenter.vue'
 import MessageDetail from './components/MessageDetail.vue'
 import MessageFilters from './components/MessageFilters.vue'
 import MessageItem from './components/MessageItem.vue'
@@ -14,7 +14,9 @@ import {
   createNotificationRule,
   createRealtimeSocket,
   deleteNotificationRule,
+  downloadGroupMessages,
   getAppConfig,
+  getGroupDailyMessageStats,
   getMessage,
   getHistorySync,
   getReadiness,
@@ -29,6 +31,7 @@ import {
   resolveMessageMedia,
   updateNotificationRule,
   type Group,
+  type DailyMessageStats,
   type HistorySyncJob,
   type Message,
   type MonitorStatus,
@@ -46,6 +49,7 @@ const notificationRules = ref<NotificationRule[]>([])
 const outboxItems = ref<NotificationOutboxItem[]>([])
 const readiness = ref<Record<string, unknown>>({})
 const appConfig = ref({ targetSenderId: '', currentUserId: '' })
+const dailyMessageStats = ref<DailyMessageStats>({ today: 0, yesterday: 0 })
 const users = ref<User[]>([])
 const monitor = ref<MonitorStatus | null>(null)
 const selectedGroupId = ref<number | null>(null)
@@ -74,6 +78,8 @@ const editingRuleId = ref<number | null>(null)
 const ruleDialogOpen = ref(false)
 const panelError = ref('')
 const previewImageURL = ref('')
+const exportingMessages = ref(false)
+const exportError = ref('')
 const monitorExpanded = ref(true)
 const mobileSidebarOpen = ref(false)
 const sidebarWidth = ref(280)
@@ -273,21 +279,6 @@ const emptyMessage = computed(() => {
 
 const actionableNotificationCount = computed(() => outboxItems.value.filter((item) => item.status === 'failed').length)
 
-const messageStats = computed(() => {
-  const senders = new Map<string, number>()
-  const types = new Map<string, number>()
-  for (const message of messages.value) {
-    const sender = message.senderName || message.weiboSenderId || '未知发送人'
-    senders.set(sender, (senders.get(sender) || 0) + 1)
-    types.set(message.messageType, (types.get(message.messageType) || 0) + 1)
-  }
-  return {
-    total: messages.value.length,
-    senders: [...senders.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
-    types: [...types.entries()].sort((a, b) => b[1] - a[1])
-  }
-})
-
 const selectedMessageNotifications = computed(() => {
   if (!selectedMessage.value) return []
   return notifications.value.filter((event) => event.messageId === selectedMessage.value?.id)
@@ -355,19 +346,43 @@ async function runRefresh() {
 async function refreshMessages() {
   messagesLoading.value = true
   try {
-    const result = await listMessages({
+    const [result] = await Promise.all([listMessages({
       groupId: selectedGroupId.value || undefined,
       weiboSenderId: selectedSenderId.value || undefined,
       q: query.value.trim() || undefined,
       since: filterSince(timeRange.value),
       limit: 50
-    })
+    }), refreshDailyMessageStats()])
     const items = result.items || []
     messages.value = items.filter(isDisplayableMessage)
     hasOlderMessages.value = items.length === 50
   } finally {
     messagesLoading.value = false
   }
+}
+
+function localDayBoundaries() {
+  const today = new Date(currentTime.value)
+  today.setHours(0, 0, 0, 0)
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  return {
+    yesterdayStart: yesterday.toISOString(),
+    todayStart: today.toISOString(),
+    tomorrowStart: tomorrow.toISOString()
+  }
+}
+
+async function refreshDailyMessageStats() {
+  const groupID = selectedGroupId.value
+  if (!groupID) {
+    dailyMessageStats.value = { today: 0, yesterday: 0 }
+    return
+  }
+  const stats = await getGroupDailyMessageStats(groupID, localDayBoundaries())
+  if (String(groupID) === String(selectedGroupId.value)) dailyMessageStats.value = stats
 }
 
 async function refreshHistorySync() {
@@ -553,6 +568,15 @@ function prependNotification(event: NotificationEvent) {
 
 function handleRealtimeEvent(event: RealtimeEvent) {
   if ((event.type === 'message_created' || event.type === 'message_updated') && event.message) {
+    if (event.type === 'message_created' && String(event.message.groupId) === String(selectedGroupId.value) && isDisplayableMessage(event.message)) {
+      const timestamp = new Date(event.message.sentAt || event.message.capturedAt).getTime()
+      const boundaries = localDayBoundaries()
+      if (timestamp >= new Date(boundaries.todayStart).getTime() && timestamp < new Date(boundaries.tomorrowStart).getTime()) {
+        dailyMessageStats.value.today++
+      } else if (timestamp >= new Date(boundaries.yesterdayStart).getTime() && timestamp < new Date(boundaries.todayStart).getTime()) {
+        dailyMessageStats.value.yesterday++
+      }
+    }
     upsertMessage(event.message)
     return
   }
@@ -571,6 +595,7 @@ function handleRealtimeEvent(event: RealtimeEvent) {
       olderHistoryNotice.value = ''
       hasOlderMessages.value = true
       void loadOlderMessages(false)
+      void refreshDailyMessageStats()
     } else if (event.historySyncJob.status === 'completed') {
       olderHistoryNotice.value = '没有新增更早消息'
     }
@@ -879,25 +904,27 @@ async function retryAllFailedJobs() {
   outboxItems.value = (await listNotificationOutbox()).items || []
 }
 
-function exportMessages(format: 'csv' | 'json' | 'md') {
-  let content = ''
-  let type = 'text/plain'
-  if (format === 'json') {
-    content = JSON.stringify(messages.value, null, 2)
-    type = 'application/json'
-  } else if (format === 'csv') {
-    const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`
-    content = ['时间,群聊,发送人,消息类型,内容', ...orderedMessages.value.map((message) => [message.sentAt || message.capturedAt, message.groupName, message.senderName, message.messageType, message.content].map(escape).join(','))].join('\n')
-    type = 'text/csv'
-  } else {
-    content = orderedMessages.value.map((message) => `- **${message.senderName || '未知发送人'}** ${formatMessageTime(message.sentAt || message.capturedAt)}\n  ${message.content || `[${message.messageType}]`}`).join('\n')
+async function exportMessages(request: MessageExportRequest) {
+  if (!selectedGroupId.value || exportingMessages.value) return
+  exportingMessages.value = true
+  exportError.value = ''
+  try {
+    const result = await downloadGroupMessages(selectedGroupId.value, {
+      since: request.since,
+      before: request.before,
+      format: request.format
+    })
+    const url = URL.createObjectURL(result.blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = request.filename
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    exportError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    exportingMessages.value = false
   }
-  const url = URL.createObjectURL(new Blob([content], { type: `${type};charset=utf-8` }))
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `weibo-messages-${new Date().toISOString().slice(0, 10)}.${format}`
-  link.click()
-  URL.revokeObjectURL(url)
 }
 
 function startSidebarResize(event: PointerEvent) {
@@ -1092,11 +1119,13 @@ onUnmounted(() => {
       :outbox-items="outboxItems"
       :notification-rules="notificationRules"
       :actionable-count="actionableNotificationCount"
-      :message-stats="messageStats"
+      :daily-message-stats="dailyMessageStats"
       :selected-group="selectedGroup"
       :history-job="historyJob"
       :history-sync-active="historySyncActive"
       :history-sync-progressing="historySyncProgressing"
+      :exporting="exportingMessages"
+      :export-error="exportError"
       @close="showNotifications = false"
       @retry-all="retryAllFailedJobs"
       @retry="retryJob"

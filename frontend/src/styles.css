@@ -1933,6 +1933,10 @@ select:focus-visible,
   width: min(520px, 96vw);
 }
 
+.control-center .pane-head h2 {
+  font-size: 20px;
+}
+
 .panel-tabs-wrap {
   padding: 10px 12px;
   border-bottom: 1px solid #dce2e7;
@@ -2004,7 +2008,7 @@ select:focus-visible,
 
 .control-center .notify-list {
   gap: 8px;
-  padding: 12px;
+  padding: 16px;
 }
 
 .control-center .notify-row {
@@ -2024,7 +2028,7 @@ select:focus-visible,
 .panel-content {
   min-height: 0;
   overflow: auto;
-  padding: 14px;
+  padding: 16px;
 }
 
 .panel-empty {
@@ -2227,7 +2231,7 @@ select:focus-visible,
 }
 
 .stat-card.messages .stat-icon { background: #e8f4ef; color: #176c53; }
-.stat-card.senders .stat-icon { background: #e9f1f8; color: #356783; }
+.stat-card.yesterday .stat-icon { background: #e9f1f8; color: #356783; }
 .stat-card.rules .stat-icon { background: #f5f0e5; color: #87651c; }
 .stat-card.failures .stat-icon { background: #f9ecea; color: #a33a31; }
 
@@ -2504,10 +2508,90 @@ select:focus-visible,
 }
 
 .export-section {
-  padding-bottom: 4px;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #dce3e7;
+  border-radius: 10px;
+  background: #fff;
 }
 
-.export-actions,
+.export-form {
+  display: grid;
+  gap: 14px;
+}
+
+.export-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.export-field > span:first-child {
+  color: #52616d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.export-field .ant-select,
+.export-field .ant-picker {
+  width: 100%;
+}
+
+.export-mode-radios {
+  display: flex;
+  gap: 28px;
+  min-height: 32px;
+  align-items: center;
+}
+
+.export-mode-radios .ant-radio-wrapper {
+  margin-inline-end: 0;
+  color: #344551;
+  font-size: 13px;
+}
+
+.export-date-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.export-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.export-presets button {
+  min-height: 26px;
+  padding: 0 12px;
+  border: 1px solid #c8d6d1;
+  border-radius: 999px;
+  background: #f3f8f6;
+  color: #526b62;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.export-presets button:hover,
+.export-presets button.active {
+  border-color: #17785d;
+  background: #e2f2eb;
+  color: #126a50;
+}
+
+.export-error {
+  margin: 0;
+  color: #a33a31;
+  font-size: 12px;
+}
+
+.export-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .detail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2515,12 +2599,15 @@ select:focus-visible,
 }
 
 .export-actions button {
-  display: inline-flex;
-  min-height: 32px;
+  display: flex;
+  min-width: 0;
+  min-height: 40px;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 0 11px;
-  font-size: 11px;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .message-detail-pane {

@@ -17,8 +17,8 @@ RestartSec=8
 KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:__APP_DIR__/logs/monitor.log
+StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target

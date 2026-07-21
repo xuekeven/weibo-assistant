@@ -15,8 +15,8 @@ Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:__APP_DIR__/logs/server.log
+StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target

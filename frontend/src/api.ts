@@ -128,6 +128,13 @@ export type AppConfig = {
   currentUserId?: string
 }
 
+export type DailyMessageStats = {
+  today: number
+  yesterday: number
+}
+
+export type MessageExportFormat = 'csv' | 'json' | 'md'
+
 export type RealtimeEvent = {
   type: string
   message?: Message
@@ -198,6 +205,49 @@ export function listMessages(params: {
   if (params.since) query.set('since', params.since)
   if (params.before) query.set('before', params.before)
   return request<ListResponse<Message>>(`/api/messages?${query.toString()}`)
+}
+
+export function getGroupDailyMessageStats(groupId: number, range: {
+  yesterdayStart: string
+  todayStart: string
+  tomorrowStart: string
+}) {
+  const query = new URLSearchParams(range)
+  return request<DailyMessageStats>(`/api/groups/${groupId}/message-stats?${query.toString()}`)
+}
+
+export async function downloadGroupMessages(groupId: number, params: {
+  since: string
+  before: string
+  format: MessageExportFormat
+}) {
+  const query = new URLSearchParams(params)
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 60_000)
+  try {
+    const response = await fetch(`${API_BASE}/api/groups/${groupId}/messages/export?${query.toString()}`, {
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      let message = text
+      try {
+        const parsed = JSON.parse(text) as { error?: string }
+        message = parsed.error || text
+      } catch {
+        // 非 JSON 错误响应直接显示原文。
+      }
+      throw new Error(message || `导出失败（HTTP ${response.status}）`)
+    }
+    const disposition = response.headers.get('Content-Disposition') || ''
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `weibo-messages.${params.format}`
+    return { blob: await response.blob(), filename }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw new Error('导出请求超时')
+    throw err
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }
 
 export function getMessage(id: number, includeRaw = false) {

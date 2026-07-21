@@ -227,10 +227,11 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `deploy/systemd/weibo-assistant-server.service` | API server 的 systemd 模板 |
 | `deploy/systemd/weibo-assistant-monitor.service` | Chrome monitor 的 systemd 模板 |
 | `deploy/systemd/weibo-assistant-frontend.service` | Go 静态前端服务的 systemd 模板 |
+| `deploy/logrotate/weibo-assistant` | server 和 monitor 项目日志的轮转模板 |
 | `scripts/build-linux.sh` | 编译 Go，并安装、构建 Vue 前端 |
 | `scripts/install-systemd.sh` | 将路径和运行用户写入模板，安装到 `/etc/systemd/system` |
 | `scripts/systemd-status.sh` | 查看一个或全部项目服务的 systemd 状态 |
-| `scripts/systemd-logs.sh` | 使用 `journalctl` 查看并跟随服务日志 |
+| `scripts/systemd-logs.sh` | 查看并跟随 server、monitor 项目日志或 frontend journal |
 
 ### 文档目录 docs
 

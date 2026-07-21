@@ -63,6 +63,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/messages/{id}", s.handleGetMessage)
 	s.mux.HandleFunc("POST /api/messages/{id}/resolve-media", s.handleResolveMessageMedia)
 	s.mux.HandleFunc("GET /api/groups/{id}/messages", s.handleListGroupMessages)
+	s.mux.HandleFunc("GET /api/groups/{id}/message-stats", s.handleGetGroupMessageStats)
+	s.mux.HandleFunc("GET /api/groups/{id}/messages/export", s.handleExportGroupMessages)
 	s.mux.HandleFunc("GET /api/groups/{id}/history-sync", s.handleGetHistorySync)
 	s.mux.HandleFunc("POST /api/groups/{id}/history-sync", s.handleCreateHistorySync)
 	s.mux.HandleFunc("GET /api/notification-rules", s.handleListNotificationRules)

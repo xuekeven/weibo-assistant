@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE_DIR="$ROOT_DIR/deploy/systemd"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+LOGROTATE_TEMPLATE="$ROOT_DIR/deploy/logrotate/weibo-assistant"
+LOGROTATE_DIR="${LOGROTATE_DIR:-/etc/logrotate.d}"
 
 APP_DIR="${APP_DIR:-/opt/weibo-assistant}"
 RUN_USER="${RUN_USER:-weibo}"
@@ -13,6 +15,17 @@ ENABLE_NOW="${ENABLE_NOW:-false}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "error: please run as root, for example: sudo APP_DIR=$APP_DIR RUN_USER=$RUN_USER $0" >&2
+  exit 1
+fi
+
+install -d -m 0750 -o "$RUN_USER" -g "$RUN_GROUP" "$APP_DIR/logs"
+touch "$APP_DIR/logs/server.log" "$APP_DIR/logs/monitor.log"
+chown "$RUN_USER:$RUN_GROUP" "$APP_DIR/logs/server.log" "$APP_DIR/logs/monitor.log"
+chmod 0640 "$APP_DIR/logs/server.log" "$APP_DIR/logs/monitor.log"
+echo "[ok] prepared $APP_DIR/logs"
+
+if ! command -v logrotate >/dev/null 2>&1; then
+  echo "error: logrotate is required to prevent project logs from growing without limit" >&2
   exit 1
 fi
 
@@ -39,6 +52,8 @@ render_unit "$TEMPLATE_DIR/weibo-assistant-monitor.service" "$UNIT_DIR/weibo-ass
 if [ "$INSTALL_FRONTEND" = "true" ]; then
   render_unit "$TEMPLATE_DIR/weibo-assistant-frontend.service" "$UNIT_DIR/weibo-assistant-frontend.service"
 fi
+
+render_unit "$LOGROTATE_TEMPLATE" "$LOGROTATE_DIR/weibo-assistant"
 
 systemctl daemon-reload
 echo "[ok] systemd daemon reloaded"

@@ -1,0 +1,10 @@
+"__APP_DIR__/logs/server.log" "__APP_DIR__/logs/monitor.log" {
+    su __RUN_USER__ __RUN_GROUP__
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
