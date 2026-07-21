@@ -6,6 +6,8 @@
 
 ### Added
 
+- 图片消息只有 FID 时，历史回溯会通过 monitor 的微博登录会话查询 `meta_query.json` 并保存 `thumbnail_240`；前端渲染待解析图片时也会创建持久化解析任务，成功后通过 WebSocket 实时刷新消息。
+- 图片提取排除 `role_icon`、徽章、等级、挂件、头像框等装饰字段；MSS 图片 URL 必须携带与附件一致的 fid，并通过迁移清理、重新解析已有污染记录。
 - 新增 PostgreSQL 持久化历史同步任务，支持 monitor 启动最近消息补偿、CDP/微博 WebSocket 重连补漏、前端指定时间范围消息回溯和向上翻页按需同步；三种模式均在遇到任务创建前已入库的微博消息 ID 时停止。
 - 前端接入 Nuxt UI 4.6.1 与 Tailwind CSS 4，使用 UApp、Button、Input、Select、Badge、Icon、Tabs、Skeleton 等组件统一交互和无障碍基础能力。
 

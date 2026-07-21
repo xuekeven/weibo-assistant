@@ -214,6 +214,9 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `006_stable_weibo_message_id.sql` | 规范微博消息 ID 并加强稳定去重 |
 | `007_classify_generic_groupchat_events.sql` | 规范通用群聊事件的消息类型 |
 | `008_history_sync_jobs.sql` | 增加历史同步任务队列、进度和单群活动任务约束 |
+| `009_generalize_missing_media_url_status.sql` | 将缺少媒体 URL 的状态统一为与消息来源无关的名称 |
+| `010_media_resolution_jobs.sql` | 增加由前端请求、monitor 使用登录态消费的图片 FID 解析任务队列 |
+| `011_repair_decorative_image_attachments.sql` | 清除误识别的身份徽章、图标和 fid 不匹配的图片 URL，并创建重新解析任务 |
 
 迁移文件按 `NNN_name.sql` 命名。已经执行过的迁移不要修改；数据库结构继续变化时，应新增下一个编号的文件。
 

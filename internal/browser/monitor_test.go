@@ -2,6 +2,7 @@ package browser
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,9 +120,106 @@ func TestParseNetworkMessagesImageWithFIDs(t *testing.T) {
 	if len(meta.FIDs) != 1 || meta.FIDs[0] != "5318460894348385" {
 		t.Fatalf("unexpected fids: %#v", meta.FIDs)
 	}
-	if meta.URLStatus != "missing_in_websocket_payload" {
+	if meta.URLStatus != "missing_in_message_payload" {
 		t.Fatalf("unexpected url status: %q", meta.URLStatus)
 	}
+}
+
+func TestParseNetworkMessagesImageIgnoresRoleIcon(t *testing.T) {
+	payload := `[
+		{
+			"data": {
+				"type": "groupchat",
+				"sub_type": 321,
+				"info": {
+					"gid": 4761715839862414,
+					"id": 5322381207801843,
+					"content": "分享图片",
+					"from_uid": 1401527553,
+					"media_type": 1,
+					"fids": [5322381209113145],
+					"role": 2,
+					"role_icon": "https://h5.sinaimg.cn/upload/100/1158/2020/05/06/videopicfeed3.png"
+				}
+			}
+		}
+	]`
+
+	messages := parseNetworkMessages(payload)
+	if len(messages) != 1 || len(messages[0].Attachments) != 1 {
+		t.Fatalf("unexpected parsed messages: %#v", messages)
+	}
+	attachment := messages[0].Attachments[0]
+	if attachment.URL != "" {
+		t.Fatalf("role icon must not become the image attachment: %#v", attachment)
+	}
+	if fids := networkAttachmentFIDsForTest(attachment); len(fids) != 1 || fids[0] != "5322381209113145" {
+		t.Fatalf("unexpected attachment fids: %#v", fids)
+	}
+}
+
+func TestExtractImageReferencesFromBodyIgnoresRoleCrownAsset(t *testing.T) {
+	body := `{
+		"messages": [{
+			"fid": "5322381209113145",
+			"role_icon": "https://h5.sinaimg.cn/upload/100/1158/2020/05/06/videopicfeed3.png",
+			"thumbnail": "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=5322381209113145&size=240,136"
+		}]
+	}`
+	refs := extractImageReferencesFromBody(body, "https://api.weibo.com/webim/groupchat/query_messages.json")
+	if len(refs) == 0 {
+		t.Fatal("expected the real fid-addressed thumbnail reference")
+	}
+	for _, ref := range refs {
+		for _, imageURL := range ref.URLs {
+			if strings.Contains(imageURL, "videopicfeed3.png") {
+				t.Fatalf("role crown asset must not be correlated with an image fid: %#v", refs)
+			}
+		}
+	}
+}
+
+func TestExtractImageReferencesFromURLIgnoresRoleCrownAsset(t *testing.T) {
+	roleIcon := "https://h5.sinaimg.cn/upload/100/1158/2020/05/06/videopicfeed3.png?fid=5322381209113145"
+	if refs := extractImageReferencesFromURL(roleIcon, roleIcon); len(refs) != 0 {
+		t.Fatalf("role crown asset must not become an image reference: %#v", refs)
+	}
+}
+
+func TestImageAttachmentsRejectMismatchedMSSFID(t *testing.T) {
+	raw := json.RawMessage(`{
+		"media_type": 1,
+		"fids": [5322381209113145],
+		"pics": [{
+			"url": "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=999&high=240&width=240&size=240,136"
+		}]
+	}`)
+	attachments := imageAttachmentsFromInfo(raw, 1, []json.Number{"5322381209113145"})
+	if len(attachments) != 1 || attachments[0].URL != "" {
+		t.Fatalf("mismatched MSS URL must be discarded: %#v", attachments)
+	}
+}
+
+func TestImageAttachmentsKeepScopedSinaimgURL(t *testing.T) {
+	raw := json.RawMessage(`{
+		"media_type": 1,
+		"fids": [5322381209113145],
+		"pics": [{"url": "https://wx1.sinaimg.cn/large/abc123.jpg"}]
+	}`)
+	attachments := imageAttachmentsFromInfo(raw, 1, []json.Number{"5322381209113145"})
+	if len(attachments) != 1 || attachments[0].URL != "https://wx1.sinaimg.cn/large/abc123.jpg" {
+		t.Fatalf("scoped sinaimg URL should remain valid: %#v", attachments)
+	}
+}
+
+func networkAttachmentFIDsForTest(attachment NetworkAttachment) []string {
+	var meta struct {
+		FIDs []string `json:"fids"`
+	}
+	if json.Unmarshal(attachment.Meta, &meta) != nil {
+		return nil
+	}
+	return meta.FIDs
 }
 
 func TestParseNetworkMessagesVideoWithCoverFID(t *testing.T) {

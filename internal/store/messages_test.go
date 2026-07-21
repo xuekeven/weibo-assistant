@@ -54,6 +54,21 @@ func TestIsDirectImageReference(t *testing.T) {
 	}
 }
 
+func TestImageURLMatchesFID(t *testing.T) {
+	if !imageURLMatchesFID("https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=5322381209113145&size=240,136", "5322381209113145") {
+		t.Fatal("matching MSS fid should be accepted")
+	}
+	if imageURLMatchesFID("https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=999&size=240,136", "5322381209113145") {
+		t.Fatal("mismatched MSS fid should be rejected")
+	}
+	if !imageURLMatchesFID("https://wx1.sinaimg.cn/large/abc123.jpg", "5322381209113145") {
+		t.Fatal("a scoped sinaimg URL does not need to embed the numeric fid")
+	}
+	if imageURLMatchesFID("https://h5.sinaimg.cn/upload/100/1158/2020/05/06/videopicfeed3.png", "5322381209113145") {
+		t.Fatal("the fixed group-role crown must never resolve an image fid")
+	}
+}
+
 func TestNormalizeWeiboThumbnailURL(t *testing.T) {
 	got := normalizeWeiboThumbnailURL(
 		"https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=5321448476379671&high=600&width=600&size=480,600",

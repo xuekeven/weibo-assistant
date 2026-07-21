@@ -358,6 +358,10 @@ func matchingNotificationRuleIDs(ctx context.Context, db messageDB, group Group,
 		   and (weibo_sender_id is null or weibo_sender_id = nullif($5, ''))
 		   and (sender_nickname is null or sender_nickname = $6)
 		   and (message_type is null or message_type = $7)
+		   and (
+		         $7 not in ('system', 'event')
+		         or (sender_id is null and weibo_sender_id is null and sender_nickname is null)
+		       )
 		 order by id asc
 	`, group.ID, group.WeiboGroupID, group.Name, user.ID, user.WeiboUserID, user.Nickname, strings.TrimSpace(messageType))
 	if err != nil {

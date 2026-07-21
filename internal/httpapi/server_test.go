@@ -49,6 +49,7 @@ func TestStrictRequestValidation(t *testing.T) {
 		{name: "invalid delete rule id", method: http.MethodDelete, path: "/api/notification-rules/not-a-number"},
 		{name: "invalid retry job id", method: http.MethodPost, path: "/api/notification-outbox/not-a-number/retry"},
 		{name: "invalid message detail id", method: http.MethodGet, path: "/api/messages/not-a-number"},
+		{name: "invalid media resolution message id", method: http.MethodPost, path: "/api/messages/not-a-number/resolve-media"},
 		{name: "unknown json field", method: http.MethodPost, path: "/api/dev/messages", body: `{"unknown":true}`},
 		{name: "multiple json values", method: http.MethodPost, path: "/api/dev/messages", body: `{} {}`},
 	}

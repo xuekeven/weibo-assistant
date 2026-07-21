@@ -61,6 +61,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/messages", s.handleListMessages)
 	s.mux.HandleFunc("POST /api/messages", s.handleCreateMessage)
 	s.mux.HandleFunc("GET /api/messages/{id}", s.handleGetMessage)
+	s.mux.HandleFunc("POST /api/messages/{id}/resolve-media", s.handleResolveMessageMedia)
 	s.mux.HandleFunc("GET /api/groups/{id}/messages", s.handleListGroupMessages)
 	s.mux.HandleFunc("GET /api/groups/{id}/history-sync", s.handleGetHistorySync)
 	s.mux.HandleFunc("POST /api/groups/{id}/history-sync", s.handleCreateHistorySync)
@@ -87,9 +88,15 @@ func (s *Server) handleLive(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleAppConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
+	currentUserID, err := s.store.GetCurrentWeiboUserID(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"targetSenderId": s.cfg.TargetSenderID,
+		"currentUserId":  currentUserID,
 	})
 }
 

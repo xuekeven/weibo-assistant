@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,40 @@ func (s *Store) Close() {
 
 func (s *Store) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
+}
+
+// GetCurrentWeiboUserID returns the account that owns the latest private IM
+// channel observed by the monitor. Every realtime group-chat event is delivered
+// on /im/<logged-in uid>, while recovered history records may not contain that
+// channel, so the latest realtime event is the durable source of truth.
+func (s *Store) GetCurrentWeiboUserID(ctx context.Context) (string, error) {
+	var channel string
+	err := s.pool.QueryRow(ctx, `
+		select coalesce((
+			select raw->>'channel'
+			  from weibo_messages
+			 where raw->>'channel' ~ '^/im/[0-9]+$'
+			 order by coalesce(sent_at, captured_at) desc, id desc
+			 limit 1
+		), '')
+	`).Scan(&channel)
+	if err != nil {
+		return "", err
+	}
+	return currentWeiboUserIDFromChannel(channel), nil
+}
+
+func currentWeiboUserIDFromChannel(channel string) string {
+	uid := strings.TrimPrefix(strings.TrimSpace(channel), "/im/")
+	if uid == "" || len(uid) == len(strings.TrimSpace(channel)) {
+		return ""
+	}
+	for _, char := range uid {
+		if char < '0' || char > '9' {
+			return ""
+		}
+	}
+	return uid
 }
 
 func (s *Store) Exec(ctx context.Context, sql string) error {

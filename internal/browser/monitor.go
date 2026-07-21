@@ -1059,7 +1059,7 @@ func extractImageReferencesFromBody(body string, sourceURL string) []NetworkImag
 }
 
 func extractImageReferencesFromURL(sourceURL string, imageURL string) []NetworkImageReference {
-	if !looksLikeImageURL(imageURL) {
+	if !looksLikeImageURL(imageURL) || isDecorativeImageURL(imageURL) {
 		return nil
 	}
 	fids := appendUniqueStrings(nil, collectFIDValuesFromURL(sourceURL)...)
@@ -1198,7 +1198,7 @@ func (c *imageReferenceCollector) walk(value any, path []string) imageReferenceS
 		}
 		return scope
 	case string:
-		if looksLikeImageURL(typed) && !skipImageURLPath(path) {
+		if looksLikeImageURL(typed) && !skipImageURLPath(path) && !isDecorativeImageURL(typed) {
 			return imageReferenceScope{urls: []string{typed}}
 		}
 	}
@@ -1214,7 +1214,7 @@ func (c *imageReferenceCollector) emit(scope imageReferenceScope) {
 	}
 	filteredURLs := make([]string, 0, len(scope.urls))
 	for _, rawURL := range scope.urls {
-		if strings.TrimSpace(rawURL) != "" {
+		if strings.TrimSpace(rawURL) != "" && !isDecorativeImageURL(rawURL) {
 			filteredURLs = appendUniqueStrings(filteredURLs, strings.TrimSpace(rawURL))
 		}
 	}
@@ -1282,7 +1282,7 @@ func collectImageURLValues(value any, path []string) []string {
 		}
 		return values
 	case string:
-		if looksLikeImageURL(typed) && !skipImageURLPath(path) {
+		if looksLikeImageURL(typed) && !skipImageURLPath(path) && !isDecorativeImageURL(typed) {
 			return []string{strings.TrimSpace(typed)}
 		}
 	}
@@ -1560,7 +1560,7 @@ func imageAttachmentsFromInfo(rawInfo json.RawMessage, mediaType int, fids []jso
 		return nil
 	}
 
-	urls := extractImageURLs(rawInfo)
+	urls := filterMessageImageURLsByFID(extractImageURLs(rawInfo), fids)
 	if len(urls) == 0 {
 		attachments := make([]NetworkAttachment, 0, max(1, len(fids)))
 		for _, fid := range fids {
@@ -1603,7 +1603,7 @@ func imageAttachmentMeta(mediaType int, fids []json.Number, url string) json.Raw
 		meta["fids"] = values
 	}
 	if strings.TrimSpace(url) == "" {
-		meta["url_status"] = "missing_in_websocket_payload"
+		meta["url_status"] = "missing_in_message_payload"
 	}
 	raw, err := json.Marshal(meta)
 	if err != nil {
@@ -1625,7 +1625,7 @@ func videoAttachmentMeta(mediaType int, fids []json.Number) json.RawMessage {
 		}
 		meta["fids"] = values
 	}
-	meta["url_status"] = "missing_in_websocket_payload"
+	meta["url_status"] = "missing_in_message_payload"
 	raw, err := json.Marshal(meta)
 	if err != nil {
 		return nil
@@ -1659,7 +1659,7 @@ func walkImageURLs(value any, path []string, seen map[string]bool, urls *[]strin
 			walkImageURLs(child, path, seen, urls)
 		}
 	case string:
-		if !looksLikeImageURL(typed) || seen[typed] {
+		if !looksLikeImageURL(typed) || isDecorativeImageURL(typed) || seen[typed] {
 			return
 		}
 		seen[typed] = true
@@ -1669,9 +1669,59 @@ func walkImageURLs(value any, path []string, seen map[string]bool, urls *[]strin
 
 func skipImageURLPath(path []string) bool {
 	joined := strings.Join(path, ".")
-	return strings.Contains(joined, "from_user") ||
+	if strings.Contains(joined, "from_user") ||
 		strings.Contains(joined, "profile_image") ||
-		strings.Contains(joined, "avatar")
+		strings.Contains(joined, "avatar") {
+		return true
+	}
+	for _, segment := range path {
+		segment = strings.ToLower(strings.TrimSpace(segment))
+		switch segment {
+		case "icon", "role_icon", "badge", "badge_icon", "verified_icon", "level_icon",
+			"medal", "medal_icon", "pendant", "pendant_url", "frame", "frame_icon",
+			"crown", "crown_icon":
+			return true
+		}
+		if strings.HasSuffix(segment, "_role_icon") || strings.HasSuffix(segment, "_badge_icon") ||
+			strings.HasSuffix(segment, "_medal_icon") || strings.HasSuffix(segment, "_level_icon") {
+			return true
+		}
+	}
+	return false
+}
+
+func filterMessageImageURLsByFID(urls []string, fids []json.Number) []string {
+	if len(urls) == 0 || len(fids) == 0 {
+		return urls
+	}
+	expected := make(map[string]bool, len(fids))
+	for _, fid := range fids {
+		if value := strings.TrimSpace(fid.String()); value != "" && value != "0" {
+			expected[value] = true
+		}
+	}
+	filtered := make([]string, 0, len(urls))
+	for _, rawURL := range urls {
+		if !isFIDAddressedImageURL(rawURL) {
+			filtered = appendUniqueStrings(filtered, rawURL)
+			continue
+		}
+		for _, urlFID := range collectFIDValuesFromURL(rawURL) {
+			if expected[urlFID] {
+				filtered = appendUniqueStrings(filtered, rawURL)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func isFIDAddressedImageURL(rawURL string) bool {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(parsed.Path, "/msget_thumbnail") || strings.HasSuffix(parsed.Path, "/msget")
 }
 
 func looksLikeImageURL(value string) bool {
@@ -1693,6 +1743,22 @@ func looksLikeImageURL(value string) bool {
 		strings.Contains(lower, ".png") ||
 		strings.Contains(lower, ".webp") ||
 		strings.Contains(lower, ".gif")
+}
+
+// isDecorativeImageURL rejects fixed Weibo UI assets that can appear beside
+// an image fid in history responses but are not the image addressed by that
+// fid. videopicfeed*.png is the group-role crown shown next to a sender.
+func isDecorativeImageURL(value string) bool {
+	parsed, err := neturl.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	nameIndex := strings.LastIndex(path, "/")
+	if nameIndex >= 0 {
+		path = path[nameIndex+1:]
+	}
+	return strings.HasPrefix(path, "videopicfeed") && strings.HasSuffix(path, ".png")
 }
 
 func looksLikeMessagePayload(payload string) bool {

@@ -11,7 +11,7 @@ import {
   ProfileOutlined,
   TeamOutlined
 } from '@ant-design/icons-vue'
-import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule, User } from '../api'
+import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule } from '../api'
 import { formatTime, notificationLabel } from '../utils/presentation'
 
 export type ManagementTab = 'notifications' | 'rules' | 'history' | 'stats'
@@ -21,11 +21,7 @@ export type MessageStats = { total: number; senders: [string, number][]; types: 
 defineProps<{
   outboxItems: NotificationOutboxItem[]
   notificationRules: NotificationRule[]
-  groups: Group[]
-  users: User[]
   actionableCount: number
-  panelError: string
-  editingRuleId: number | null
   messageStats: MessageStats
   selectedGroup: Group | null
   historyJob: HistorySyncJob | null
@@ -34,13 +30,11 @@ defineProps<{
 }>()
 
 const tab = defineModel<ManagementTab>('tab', { required: true })
-const ruleForm = defineModel<RuleForm>('ruleForm', { required: true })
-
 defineEmits<{
   close: []
   retryAll: []
   retry: [item: NotificationOutboxItem]
-  saveRule: []
+  openRule: []
   editRule: [rule: NotificationRule]
   removeRule: [rule: NotificationRule]
   export: [format: 'csv' | 'json' | 'md']
@@ -109,15 +103,14 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
     </div>
 
     <div v-else-if="tab === 'rules'" class="panel-content rules-panel">
-      <p v-if="panelError" class="panel-error">{{ panelError }}</p>
-      <form class="rule-form" @submit.prevent="$emit('saveRule')">
-        <input v-model="ruleForm.name" required placeholder="规则名称" />
-        <select v-model="ruleForm.groupId"><option value="">全部群聊</option><option v-for="group in groups" :key="group.id" :value="group.weiboGroupId">{{ group.name }}</option></select>
-        <select v-model="ruleForm.senderId"><option value="">全部发送人</option><option v-for="user in users" :key="user.id" :value="user.weiboUserId">{{ user.nickname }}</option></select>
-        <select v-model="ruleForm.messageType"><option value="">全部消息类型</option><option value="text">文本</option><option value="image">图片</option><option value="video">视频</option><option value="system">系统消息</option><option value="recall">撤回</option><option value="unknown">其他</option></select>
-        <label><input v-model="ruleForm.enabled" type="checkbox" /> 启用</label>
-        <button class="primary-action" type="submit">{{ editingRuleId ? '保存修改' : '创建规则' }}</button>
-      </form>
+      <section class="history-panel-hero rule-panel-hero">
+        <div>
+          <span class="history-panel-eyebrow">当前群聊</span>
+          <h3>{{ selectedGroup?.name || '未选择群聊' }}</h3>
+          <p>{{ selectedGroup ? '可以为当前群聊创建发送人和消息类型通知规则。' : '可以创建跨群聊规则，也可以先在左侧选择一个群聊。' }}</p>
+        </div>
+        <button class="primary-action history-panel-action" type="button" @click="$emit('openRule')">新建通知规则</button>
+      </section>
       <article v-for="rule in notificationRules" :key="rule.id" class="rule-card">
         <div><strong>{{ rule.name }}</strong><span :class="rule.enabled ? 'enabled' : 'disabled'">{{ rule.enabled ? '启用' : '停用' }}</span></div>
         <p>{{ rule.groupName || rule.weiboGroupId || '全部群聊' }} · {{ rule.senderNickname || rule.weiboSenderId || '全部发送人' }} · {{ rule.messageType || '全部类型' }}</p>

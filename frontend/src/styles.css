@@ -1012,6 +1012,34 @@ button:disabled {
   width: 100%;
 }
 
+.message-row.own-message {
+  grid-template-columns: minmax(0, 1fr) 34px;
+}
+
+.message-row.own-message .avatar.sender {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.message-row.own-message .message-main {
+  display: flex;
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.message-row.own-message .message-meta {
+  justify-content: flex-end;
+}
+
+.message-row.own-message .bubble {
+  border-color: #b9d9cd;
+  background: #e7f4ef;
+  text-align: left;
+}
+
 .message-row.system-message {
   display: flex;
   justify-content: center;
@@ -1929,7 +1957,7 @@ select:focus-visible,
   height: 42px;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 10px;
   padding: 0 10px;
   border: 0;
   border-radius: 6px;
@@ -1939,6 +1967,10 @@ select:focus-visible,
   font-weight: 600;
   line-height: 42px;
   box-shadow: none;
+}
+
+.panel-tabs .ant-radio-button-wrapper .anticon {
+  margin-inline-end: 2px;
 }
 
 .panel-tabs .ant-radio-button-wrapper::before {
@@ -2001,17 +2033,6 @@ select:focus-visible,
   text-align: center;
 }
 
-.rule-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 16px;
-  padding: 12px;
-  border: 1px solid #d7e2dd;
-  border-radius: 9px;
-  background: #f7fbf9;
-}
-
 .panel-error {
   margin-bottom: 9px;
   padding: 8px 10px;
@@ -2019,27 +2040,6 @@ select:focus-visible,
   background: #fff1ef;
   color: #9f2a20;
   font-size: 11px;
-}
-
-.rule-form input,
-.rule-form select {
-  min-width: 0;
-  height: 34px;
-  padding: 0 9px;
-  border: 1px solid #cbd5dd;
-  border-radius: 7px;
-  background: #fff;
-}
-
-.rule-form > input:first-child {
-  grid-column: 1 / -1;
-}
-
-.rule-form label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
 }
 
 .primary-action {
@@ -2075,6 +2075,104 @@ select:focus-visible,
 
 .rule-card .enabled { color: #17785d; }
 .rule-card .disabled { color: #8b98a2; }
+
+.rules-panel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.rule-panel-hero {
+  margin-bottom: 2px;
+}
+
+.rule-dialog {
+  width: min(560px, 100%);
+}
+
+.rule-dialog > header p {
+  margin-top: 4px;
+  color: #71808b;
+  font-size: 12px;
+}
+
+.rule-dialog-form {
+  display: grid;
+}
+
+.rule-dialog-fields {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+}
+
+.rule-dialog-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.rule-dialog-label {
+  color: #34424c;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.rule-dialog-label em {
+  margin-left: 5px;
+  color: #17785d;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.rule-dialog-field > small,
+.rule-enabled-field small {
+  color: #7a8892;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.rule-dialog-field .ant-input,
+.rule-dialog-field .ant-select {
+  width: 100%;
+}
+
+.rule-enabled-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #dbe5e1;
+  border-radius: 8px;
+  background: #f6faf8;
+  cursor: pointer;
+}
+
+.rule-enabled-field > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.rule-enabled-field strong {
+  color: #34424c;
+  font-size: 13px;
+}
+
+.rule-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid #e5eaed;
+  background: #fafcfd;
+}
+
+.rule-dialog-error {
+  margin: -4px 0 0;
+}
 
 .stats-panel {
   display: grid;
@@ -2337,8 +2435,8 @@ select:focus-visible,
 .stats-section-head h3 {
   margin: 0;
   color: #2f4050;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 16px;
+  font-weight: 700;
 }
 
 .stats-section-head > span {

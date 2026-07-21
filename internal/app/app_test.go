@@ -19,6 +19,27 @@ func TestArchiveOnlyEventDoesNotCreateNotification(t *testing.T) {
 	}
 }
 
+func TestSystemMessageDoesNotMatchTargetSender(t *testing.T) {
+	notification, matched := notificationForNetworkMessage(config.Config{
+		TargetSenderID:          "1401527553",
+		WeworkRelayURL:          "https://relay.example.test/send",
+		WeworkRelayAPIKey:       "test-key",
+		WeworkRelayToUser:       "XueKai",
+		NotificationMaxAttempts: 3,
+	}, browser.NetworkMessage{
+		MessageType: "system",
+		SenderID:    "1401527553",
+		SenderName:  "tombkeeper",
+		Content:     "关耳儿贝 加入了群",
+	})
+	if notification == nil {
+		t.Fatal("system messages should still be available for explicit system/group notification rules")
+	}
+	if matched {
+		t.Fatal("system message must not match target sender notification")
+	}
+}
+
 func TestBuildTargetNotificationContent(t *testing.T) {
 	location := time.FixedZone("CST", 8*60*60)
 	sentAt := time.Date(2026, 7, 9, 18, 25, 0, 0, location)

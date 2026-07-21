@@ -125,6 +125,7 @@ export type NotificationOutboxItem = {
 
 export type AppConfig = {
   targetSenderId?: string
+  currentUserId?: string
 }
 
 export type RealtimeEvent = {
@@ -201,6 +202,12 @@ export function listMessages(params: {
 
 export function getMessage(id: number, includeRaw = false) {
   return request<Message>(`/api/messages/${id}?includeRaw=${includeRaw}`)
+}
+
+export function resolveMessageMedia(id: number) {
+  return request<{ messageId: number; queued: number }>(`/api/messages/${id}/resolve-media`, {
+    method: 'POST'
+  })
 }
 
 export function listUsers(q = '', limit = 200) {

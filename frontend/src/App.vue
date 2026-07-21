@@ -7,6 +7,7 @@ import ManagementCenter, { type ManagementTab, type RuleForm } from './component
 import MessageDetail from './components/MessageDetail.vue'
 import MessageFilters from './components/MessageFilters.vue'
 import MessageItem from './components/MessageItem.vue'
+import RuleDialog from './components/RuleDialog.vue'
 import { formatTime } from './utils/presentation'
 import {
   createHistorySync,
@@ -25,6 +26,7 @@ import {
   listNotificationRules,
   listUsers,
   retryNotificationOutbox,
+  resolveMessageMedia,
   updateNotificationRule,
   type Group,
   type HistorySyncJob,
@@ -43,7 +45,7 @@ const notifications = ref<NotificationEvent[]>([])
 const notificationRules = ref<NotificationRule[]>([])
 const outboxItems = ref<NotificationOutboxItem[]>([])
 const readiness = ref<Record<string, unknown>>({})
-const appConfig = ref({ targetSenderId: '' })
+const appConfig = ref({ targetSenderId: '', currentUserId: '' })
 const users = ref<User[]>([])
 const monitor = ref<MonitorStatus | null>(null)
 const selectedGroupId = ref<number | null>(null)
@@ -69,6 +71,7 @@ const historyError = ref('')
 const olderHistoryNotice = ref('')
 const ruleForm = ref<RuleForm>({ name: '', groupId: '', senderId: '', messageType: '', enabled: true })
 const editingRuleId = ref<number | null>(null)
+const ruleDialogOpen = ref(false)
 const panelError = ref('')
 const previewImageURL = ref('')
 const monitorExpanded = ref(true)
@@ -80,6 +83,7 @@ const autoFollowMessages = ref(true)
 const messageListRef = ref<HTMLElement | null>(null)
 const realtimeStatus = ref('connecting')
 const currentTime = ref(new Date())
+const mediaResolutionRequests = new Set<number>()
 const allSelectValue = '__all__'
 const antTheme = {
   token: {
@@ -330,7 +334,10 @@ async function runRefresh() {
   notificationRules.value = ruleResult.items || []
   outboxItems.value = outboxResult.items || []
   readiness.value = readinessResult
-  appConfig.value = { targetSenderId: configResult.targetSenderId || '' }
+  appConfig.value = {
+    targetSenderId: configResult.targetSenderId || '',
+    currentUserId: configResult.currentUserId || ''
+  }
 
   if (!selectedGroupId.value && visibleGroups.value.length > 0) {
     selectedGroupId.value = visibleGroups.value[0].id
@@ -426,7 +433,7 @@ async function selectGroup(group: Group) {
 function messageMatchesCurrentFilters(message: Message) {
   if (selectedGroupId.value && String(message.groupId) !== String(selectedGroupId.value)) return false
   const sender = selectedSenderId.value
-  if (sender && message.weiboSenderId !== sender) return false
+  if (sender && (message.messageType === 'system' || message.messageType === 'event' || message.weiboSenderId !== sender)) return false
   const since = filterSince(timeRange.value)
   if (since && new Date(message.sentAt || message.capturedAt).getTime() < new Date(since).getTime()) return false
   const keyword = query.value.trim().toLowerCase()
@@ -450,6 +457,9 @@ function sanitizeGroup(group: Group): Group {
 }
 
 function upsertMessage(message: Message) {
+  if (!messageHasUnresolvedImage(message)) {
+    mediaResolutionRequests.delete(message.id)
+  }
   const index = messages.value.findIndex((item) => item.id === message.id)
   if (!isDisplayableMessage(message)) {
     if (index >= 0) messages.value.splice(index, 1)
@@ -481,6 +491,26 @@ function upsertMessage(message: Message) {
   }
   if (shouldFollow) {
     scrollMessagesToBottom()
+  }
+}
+
+function messageHasUnresolvedImage(message: Message) {
+  return (message.attachments || []).some((attachment) =>
+    attachment.attachmentType === 'image' &&
+    !(attachment.url || '').trim() &&
+    Array.isArray(attachment.meta?.fids) &&
+    attachment.meta.fids.length > 0
+  )
+}
+
+async function requestMessageMediaResolution(message: Message) {
+  if (!monitorIsFresh.value || !messageHasUnresolvedImage(message) || mediaResolutionRequests.has(message.id)) return
+  mediaResolutionRequests.add(message.id)
+  try {
+    await resolveMessageMedia(message.id)
+  } catch (err) {
+    mediaResolutionRequests.delete(message.id)
+    console.warn('request media resolution failed', err)
   }
 }
 
@@ -752,7 +782,26 @@ function startRuleFromMessage(message: Message) {
   }
   panelTab.value = 'rules'
   showNotifications.value = true
+  ruleDialogOpen.value = true
   selectedMessage.value = null
+}
+
+function openRuleDialog() {
+  editingRuleId.value = null
+  panelError.value = ''
+  ruleForm.value = {
+    name: '',
+    groupId: selectedGroup.value?.weiboGroupId || '',
+    senderId: '',
+    messageType: '',
+    enabled: true
+  }
+  ruleDialogOpen.value = true
+}
+
+function closeRuleDialog() {
+  ruleDialogOpen.value = false
+  panelError.value = ''
 }
 
 async function copyMessageContent(message: Message) {
@@ -783,6 +832,8 @@ function editRule(rule: NotificationRule) {
     messageType: rule.messageType || '',
     enabled: rule.enabled
   }
+  panelError.value = ''
+  ruleDialogOpen.value = true
 }
 
 async function saveRule() {
@@ -804,6 +855,7 @@ async function saveRule() {
     editingRuleId.value = null
     ruleForm.value = { name: '', groupId: '', senderId: '', messageType: '', enabled: true }
     notificationRules.value = (await listNotificationRules()).items || []
+    closeRuleDialog()
   } catch (err) {
     panelError.value = err instanceof Error ? err.message : String(err)
   }
@@ -995,9 +1047,12 @@ onUnmounted(() => {
             :key="message.id"
             :message="message"
             :query="query"
+            :can-resolve-media="monitorIsFresh"
+            :is-own="Boolean(appConfig.currentUserId) && message.weiboSenderId === appConfig.currentUserId"
             @details="openMessageDetails"
             @preview="previewImageURL = $event"
             @media-loaded="handleMessageMediaLoaded"
+            @resolve-media="requestMessageMediaResolution"
           />
 
           <div v-if="!messagesLoading && orderedMessages.length === 0" class="empty-state">
@@ -1034,14 +1089,9 @@ onUnmounted(() => {
     <ManagementCenter
       v-if="showNotifications"
       v-model:tab="panelTab"
-      v-model:rule-form="ruleForm"
       :outbox-items="outboxItems"
       :notification-rules="notificationRules"
-      :groups="groups"
-      :users="users"
       :actionable-count="actionableNotificationCount"
-      :panel-error="panelError"
-      :editing-rule-id="editingRuleId"
       :message-stats="messageStats"
       :selected-group="selectedGroup"
       :history-job="historyJob"
@@ -1050,11 +1100,22 @@ onUnmounted(() => {
       @close="showNotifications = false"
       @retry-all="retryAllFailedJobs"
       @retry="retryJob"
-      @save-rule="saveRule"
+      @open-rule="openRuleDialog"
       @edit-rule="editRule"
       @remove-rule="removeRule"
       @export="exportMessages"
       @open-history="openHistoryDialog"
+    />
+
+    <RuleDialog
+      v-if="ruleDialogOpen"
+      v-model:rule-form="ruleForm"
+      :groups="groups"
+      :users="users"
+      :editing="Boolean(editingRuleId)"
+      :error="panelError"
+      @close="closeRuleDialog"
+      @submit="saveRule"
     />
 
     <MessageDetail

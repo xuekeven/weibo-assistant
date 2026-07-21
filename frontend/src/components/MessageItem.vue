@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Attachment, Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
 
 const props = defineProps<{
   message: Message
   query: string
+  canResolveMedia: boolean
+  isOwn: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   details: [message: Message]
   preview: [url: string]
   mediaLoaded: []
+  resolveMedia: [message: Message]
 }>()
 
 const imageAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'image'))
@@ -19,6 +22,10 @@ const videoAttachments = computed(() => (props.message.attachments || []).filter
 const isVideoMessage = computed(() => props.message.messageType === 'video' || videoAttachments.value.length > 0)
 const parts = computed(() => messageContentParts(props.message.content))
 const fids = computed(() => imageAttachments.value.flatMap(attachmentFids).filter(Boolean))
+const unresolvedImageFIDs = computed(() => imageAttachments.value
+  .filter((attachment) => !(attachment.url || '').trim())
+  .flatMap(attachmentFids)
+  .filter(Boolean))
 const failedAvatarURL = ref('')
 const failedImageURLs = ref<Record<string, boolean>>({})
 
@@ -91,13 +98,23 @@ function imageKey(attachment: Attachment) {
 function markImageFailed(attachment: Attachment) {
   failedImageURLs.value = { ...failedImageURLs.value, [imageKey(attachment)]: true }
 }
+
+watch(
+  [() => props.canResolveMedia, () => props.message.id, () => unresolvedImageFIDs.value.join(',')],
+  ([canResolve]) => {
+    if (canResolve && unresolvedImageFIDs.value.length > 0) {
+      emit('resolveMedia', props.message)
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
   <article v-if="message.messageType === 'system'" class="message-row system-message">
     <button type="button" :title="formatTime(message.sentAt || message.capturedAt)" @click="$emit('details', message)">{{ message.content || '微博群聊系统消息' }}</button>
   </article>
-  <article v-else class="message-row">
+  <article v-else class="message-row" :class="{ 'own-message': isOwn }">
     <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="message.senderAvatar" alt="" loading="lazy" @error="failedAvatarURL = message.senderAvatar || ''" />
     <span v-else class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
     <div class="message-main">

@@ -138,6 +138,16 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		cancelHistory()
 		<-historyDone
 	}()
+	mediaCtx, cancelMedia := context.WithCancel(ctx)
+	mediaDone := make(chan struct{})
+	go func() {
+		defer close(mediaDone)
+		runMediaResolutionWorker(mediaCtx, st, imageURLByFID, historyTarget)
+	}()
+	defer func() {
+		cancelMedia()
+		<-mediaDone
+	}()
 	if strings.TrimSpace(cfg.WeworkRelayAPIKey) != "" {
 		workerCtx, cancelWorker := context.WithCancel(ctx)
 		workerDone := make(chan struct{})
@@ -371,7 +381,7 @@ func notificationForNetworkMessage(cfg config.Config, message browser.NetworkMes
 		CapturedAt:    time.Now(),
 	}
 	targetMatched := false
-	if hasTargetSender(cfg) {
+	if hasTargetSender(cfg) && messageCanMatchTargetSender(message.MessageType) {
 		targetMatched = messageMatchesTargetSender(cfg, storedMessage)
 	}
 	if strings.TrimSpace(cfg.WeworkRelayURL) == "" || strings.TrimSpace(cfg.WeworkRelayAPIKey) == "" {
@@ -383,6 +393,15 @@ func notificationForNetworkMessage(cfg config.Config, message browser.NetworkMes
 		ToUser:      cfg.WeworkRelayToUser,
 		MaxAttempts: cfg.NotificationMaxAttempts,
 	}, targetMatched
+}
+
+func messageCanMatchTargetSender(messageType string) bool {
+	switch strings.TrimSpace(messageType) {
+	case "system", "event":
+		return false
+	default:
+		return true
+	}
 }
 
 func runNotificationWorker(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics) {

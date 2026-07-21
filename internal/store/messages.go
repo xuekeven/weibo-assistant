@@ -114,6 +114,7 @@ type ResolveImageAttachmentParams struct {
 	FID       string
 	URL       string
 	SourceURL string
+	Force     bool
 }
 
 type ListGroupsParams struct {
@@ -484,6 +485,9 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 	if fid == "" || imageURL == "" {
 		return 0, nil
 	}
+	if !imageURLMatchesFID(imageURL, fid) {
+		return 0, fmt.Errorf("image URL fid does not match attachment fid %s", fid)
+	}
 	imageURL = normalizeWeiboThumbnailURL(imageURL, sourceURL)
 
 	metaPatch := map[string]any{
@@ -524,11 +528,12 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 			                url like '%size=111,240%'
 			                and not (coalesce(meta, '{}'::jsonb) ? 'resolved_url')
 			           )
-			           or (
-			                $5
-			                and coalesce(meta->>'resolved_url_source', '') like '%/query_messages.json%'
-			           )
-			     )
+		           or (
+		                $5
+		                and coalesce(meta->>'resolved_url_source', '') like '%/query_messages.json%'
+		           )
+		           or $6
+		     )
 		     and (
 		           coalesce(meta, '{}'::jsonb) @> $3::jsonb
 		           or coalesce(meta, '{}'::jsonb) @> $4::jsonb
@@ -537,7 +542,7 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 		)
 		select distinct message_id
 		  from updated
-	`, imageURL, string(metaPatchRaw), string(fidFilterRaw), string(taggedURLRaw), isDirectImageReference(sourceURL, imageURL))
+	`, imageURL, string(metaPatchRaw), string(fidFilterRaw), string(taggedURLRaw), isDirectImageReference(sourceURL, imageURL), params.Force)
 	if err != nil {
 		return 0, err
 	}
@@ -559,6 +564,25 @@ func (s *Store) ResolveImageAttachmentURL(ctx context.Context, params ResolveIma
 
 func isDirectImageReference(sourceURL string, imageURL string) bool {
 	return strings.TrimSpace(sourceURL) != "" && strings.TrimSpace(sourceURL) == strings.TrimSpace(imageURL)
+}
+
+func imageURLMatchesFID(rawURL string, fid string) bool {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	nameIndex := strings.LastIndex(path, "/")
+	if nameIndex >= 0 {
+		path = path[nameIndex+1:]
+	}
+	if strings.HasPrefix(path, "videopicfeed") && strings.HasSuffix(path, ".png") {
+		return false
+	}
+	if !strings.HasSuffix(parsed.Path, "/msget_thumbnail") && !strings.HasSuffix(parsed.Path, "/msget") {
+		return true
+	}
+	return strings.TrimSpace(parsed.Query().Get("fid")) == strings.TrimSpace(fid)
 }
 
 func normalizeWeiboThumbnailURL(rawURL string, sourceURL string) string {
@@ -771,9 +795,11 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 	}
 	if params.SenderID > 0 {
 		conditions = append(conditions, "m.sender_id = "+addArg(params.SenderID))
+		conditions = append(conditions, "m.message_type not in ('system', 'event')")
 	}
 	if params.WeiboSenderID = strings.TrimSpace(params.WeiboSenderID); params.WeiboSenderID != "" {
 		conditions = append(conditions, "u.weibo_user_id = "+addArg(params.WeiboSenderID))
+		conditions = append(conditions, "m.message_type not in ('system', 'event')")
 	}
 	if params.MessageType = strings.TrimSpace(params.MessageType); params.MessageType != "" {
 		conditions = append(conditions, "m.message_type = "+addArg(params.MessageType))

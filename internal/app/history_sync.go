@@ -148,7 +148,7 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 			if job.RequestedTo != nil && message.SentAt != nil && message.SentAt.After(*job.RequestedTo) {
 				continue
 			}
-			created, err := persistHistoryMessage(ctx, cfg, st, metrics, imageURLByFID, job, message)
+			created, err := persistHistoryMessage(ctx, cfg, st, metrics, imageURLByFID, targetURL, job, message)
 			if err != nil {
 				return err
 			}
@@ -197,7 +197,7 @@ func historySyncBoundaryReached(stopMID string, messageMID string, existedAtSnap
 	return false, ""
 }
 
-func persistHistoryMessage(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, job store.HistorySyncJob, message browser.NetworkMessage) (bool, error) {
+func persistHistoryMessage(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, targetURL string, job store.HistorySyncJob, message browser.NetworkMessage) (bool, error) {
 	if message.GroupID != "" && message.GroupID != job.WeiboGroupID {
 		return false, nil
 	}
@@ -241,6 +241,16 @@ func persistHistoryMessage(ctx context.Context, cfg config.Config, st *store.Sto
 	}
 	if err := st.MarkMonitorMessage(ctx); err != nil {
 		slog.Warn("update monitor last message time after history sync failed", "error", err)
+	}
+	if resolveErr := resolveHistoryImageAttachments(ctx, st, imageURLByFID, targetURL, message.Attachments); resolveErr != nil {
+		slog.Warn("resolve history image attachments failed",
+			"messageID", result.Message.ID,
+			"weiboMessageID", result.Message.WeiboMessageID,
+			"error", resolveErr,
+		)
+		if _, enqueueErr := st.EnqueueMediaResolutionForMessage(ctx, result.Message.ID); enqueueErr != nil {
+			slog.Warn("enqueue unresolved history image attachments failed", "messageID", result.Message.ID, "error", enqueueErr)
+		}
 	}
 	return result.Created, nil
 }

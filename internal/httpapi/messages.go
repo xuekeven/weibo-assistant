@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/xuekeven/weibo-assistant/internal/store"
 )
 
@@ -155,6 +156,35 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, message)
+}
+
+func (s *Server) handleResolveMessageMedia(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/messages/", "/resolve-media")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, err := s.store.GetMessageByID(r.Context(), id, false); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	queued, err := s.store.EnqueueMediaResolutionForMessage(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	status := http.StatusAccepted
+	if queued == 0 {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{
+		"messageId": id,
+		"queued":    queued,
+	})
 }
 
 func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +413,7 @@ func imageAttachmentFromRaw(raw json.RawMessage) (store.Attachment, bool) {
 	}
 	meta := map[string]any{
 		"media_type": event.Data.Info.MediaType,
-		"url_status": "missing_in_websocket_payload",
+		"url_status": "missing_in_message_payload",
 	}
 	if len(event.Data.Info.FIDs) > 0 {
 		fids := make([]string, 0, len(event.Data.Info.FIDs))
