@@ -51,6 +51,7 @@ func TestStrictRequestValidation(t *testing.T) {
 		{name: "invalid message detail id", method: http.MethodGet, path: "/api/messages/not-a-number"},
 		{name: "invalid media resolution message id", method: http.MethodPost, path: "/api/messages/not-a-number/resolve-media"},
 		{name: "missing daily stats range", method: http.MethodGet, path: "/api/groups/3/message-stats"},
+		{name: "unordered daily stats range", method: http.MethodGet, path: "/api/groups/3/message-stats?yesterdayStart=2026-07-22T00%3A00%3A00Z&todayStart=2026-07-21T00%3A00%3A00Z&tomorrowStart=2026-07-23T00%3A00%3A00Z"},
 		{name: "missing message export range", method: http.MethodGet, path: "/api/groups/3/messages/export"},
 		{name: "unknown json field", method: http.MethodPost, path: "/api/dev/messages", body: `{"unknown":true}`},
 		{name: "multiple json values", method: http.MethodPost, path: "/api/dev/messages", body: `{} {}`},
@@ -86,6 +87,25 @@ func TestLiveEndpointDoesNotRequireDependencies(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestCORSAllowsRuleDeletionAndExposesDownloadFilename(t *testing.T) {
+	server := NewServer(config.Config{AppEnv: "production", FrontendPort: 6002}, nil, nil)
+	request := httptest.NewRequest(http.MethodOptions, "/api/notification-rules/1", nil)
+	request.Header.Set("Origin", "http://localhost:6002")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if methods := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, "DELETE") {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want DELETE", methods)
+	}
+	if exposed := response.Header().Get("Access-Control-Expose-Headers"); exposed != "Content-Disposition" {
+		t.Fatalf("Access-Control-Expose-Headers = %q", exposed)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -29,6 +30,10 @@ func (s *Server) handleGetGroupMessageStats(w http.ResponseWriter, r *http.Reque
 	}
 	tomorrowStart, ok := requiredQueryTime(w, r, "tomorrowStart")
 	if !ok {
+		return
+	}
+	if !yesterdayStart.Before(todayStart) || !todayStart.Before(tomorrowStart) {
+		writeError(w, http.StatusBadRequest, errors.New("daily stats boundaries must be strictly increasing"))
 		return
 	}
 	stats, err := s.store.GetGroupDailyMessageStats(r.Context(), groupID, yesterdayStart, todayStart, tomorrowStart)
@@ -82,7 +87,9 @@ func (s *Server) handleExportGroupMessages(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	if _, err := w.Write(content); err != nil {
+		slog.Warn("write message export failed", "groupID", groupID, "format", format, "error", err)
+	}
 }
 
 func requiredQueryTime(w http.ResponseWriter, r *http.Request, key string) (time.Time, bool) {
@@ -111,8 +118,8 @@ func encodeMessageExport(format string, messages []store.ExportMessage) ([]byte,
 		}
 		for _, message := range messages {
 			if err := writer.Write([]string{
-				message.SentAt.Format(time.RFC3339), message.GroupName, message.SenderName,
-				message.WeiboSenderID, message.MessageType, message.Content, message.WeiboMessageID,
+				message.SentAt.Format(time.RFC3339), safeCSVCell(message.GroupName), safeCSVCell(message.SenderName),
+				safeCSVCell(message.WeiboSenderID), safeCSVCell(message.MessageType), safeCSVCell(message.Content), safeCSVCell(message.WeiboMessageID),
 			}); err != nil {
 				return nil, "", err
 			}
@@ -125,6 +132,25 @@ func encodeMessageExport(format string, messages []store.ExportMessage) ([]byte,
 			fmt.Fprintf(&buffer, "- **%s** %s\n  %s\n", fallbackExportText(message.SenderName, "未知发送人"), message.SentAt.Format(time.RFC3339), fallbackExportText(message.Content, "["+message.MessageType+"]"))
 		}
 		return []byte(buffer.String()), "text/markdown; charset=utf-8", nil
+	}
+}
+
+// Spreadsheet programs may interpret untrusted cells beginning with these
+// characters as formulas. Prefixing an apostrophe preserves the visible text
+// while preventing exported chat content from executing as a formula.
+func safeCSVCell(value string) string {
+	if value != "" && (value[0] == '\t' || value[0] == '\r' || value[0] == '\n') {
+		return "'" + value
+	}
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	if trimmed == "" {
+		return value
+	}
+	switch trimmed[0] {
+	case '=', '+', '-', '@':
+		return "'" + value
+	default:
+		return value
 	}
 }
 

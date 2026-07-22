@@ -42,6 +42,7 @@
 - 数据库通知规则匹配，环境变量自动同步默认规则。
 - 企业微信 outbox 异步投递、指数退避重试和最终失败记录。
 - Go HTTP API、浏览器 WebSocket 实时推送和 Vue 消息页面。
+- 管理中心按本地自然日统计成员消息，并按单天或区间导出 CSV、JSON、Markdown；群系统事件不计入统计和导出。
 - `/livez`、`/readyz`、monitor freshness 与 Prometheus `/metrics`。
 - systemd 常驻部署和 Go 静态前端服务。
 - 带版本、校验和与事务锁的数据库迁移。
@@ -108,10 +109,12 @@ weibo-assistant/
 │   └── dist/                  前端生产构建产物
 ├── migrations/                PostgreSQL 版本化迁移 SQL
 ├── deploy/systemd/            systemd service 模板
+├── deploy/logrotate/           server/monitor 日志轮转模板
 ├── scripts/                   构建、安装和运维脚本
 ├── docs/                      架构、数据库和部署文档
 ├── bin/                       Go 编译产物
 ├── .weibo-profile/            Chrome 登录态和用户数据
+├── logs/                      server/monitor 运行日志
 ├── .env                       当前环境的私密配置
 ├── .env.example               可提交的配置示例
 ├── go.mod / go.sum            Go 模块及依赖版本
@@ -132,6 +135,7 @@ weibo-assistant/
 | `go.sum` | 锁定依赖内容校验和，保证依赖下载一致 | 通过 Go 命令维护 |
 | `bin/weibo-assistant` | `build-linux.sh` 生成的 Go 可执行文件 | 否，可重新构建 |
 | `.weibo-profile/` | Chrome Cookie、localStorage 和微博登录状态 | 否，私密且禁止提交 |
+| `logs/` | systemd 部署后生成的 server、monitor 日志与轮转文件 | 否，由服务和 logrotate 维护 |
 | `.gomodcache/` | 本地 Go 依赖缓存 | 否，可删除后重新生成 |
 
 `.env` 和 `.weibo-profile/` 都可能包含账号凭证。复制、备份和设置服务器权限时应把它们当作密钥处理。
@@ -163,6 +167,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `internal/httpapi/server.go` | 注册 API、健康检查、指标和开发路由，配置 CORS |
 | `internal/httpapi/messages.go` | 群组、用户、消息、通知规则和通知事件的 HTTP handler |
 | `internal/httpapi/history_sync.go` | 创建和查询历史同步任务的 HTTP handler |
+| `internal/httpapi/message_exports.go` | 成员消息的自然日统计和 CSV、JSON、Markdown 导出 handler |
 | `internal/httpapi/realtime.go` | 监听 PostgreSQL `LISTEN/NOTIFY` 并转换为前端实时事件 |
 | `internal/httpapi/websocket.go` | 管理浏览器 WebSocket 客户端、握手、帧读取和广播 |
 | `internal/migrate/migrate.go` | 按版本执行 `migrations/*.sql`，校验 SHA-256 并防止并发迁移 |
@@ -170,6 +175,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `internal/store/store.go` | 创建 PostgreSQL 连接池、封装事务、monitor 状态和实时事件 |
 | `internal/store/messages.go` | 群组、用户、消息和附件的查询、事务写入及数据库幂等去重 |
 | `internal/store/history_sync.go` | 历史同步任务入队、领取、进度、完成状态和消息边界查询 |
+| `internal/store/message_exports.go` | 成员消息统计和按时间区间导出查询 |
 | `internal/store/notifications.go` | 通知规则匹配和通知事件查询 |
 | `internal/store/outbox.go` | 通知任务入队、并发安全领取、成功和失败状态更新 |
 | `internal/store/observability.go` | 运行指标、通知积压和最后消息时间的数据库读写 |
@@ -200,7 +206,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 
 开发时由 Node.js/Vite 运行 `frontend/src`；生产时 Node.js 先构建出 `frontend/dist`，再由 Go `frontend` 子命令或 Nginx 托管。
 
-前端使用 Nuxt UI `4.6.1`（独立 Vue + Vite 模式）作为组件库，并通过 Tailwind CSS 4 提供设计令牌和工具样式。`vite.config.ts` 注册 `@nuxt/ui/vite`，`src/main.ts` 注册 Vue plugin，根组件使用 `UApp`。
+前端使用 Ant Design Vue `4.2.6` 和 `@ant-design/icons-vue`，日期计算使用 Day.js；`src/main.ts` 统一注册页面使用的组件，视觉细节由 `src/styles.css` 管理。
 
 ### 数据库迁移 migrations
 
@@ -217,6 +223,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 | `009_generalize_missing_media_url_status.sql` | 将缺少媒体 URL 的状态统一为与消息来源无关的名称 |
 | `010_media_resolution_jobs.sql` | 增加由前端请求、monitor 使用登录态消费的图片 FID 解析任务队列 |
 | `011_repair_decorative_image_attachments.sql` | 清除误识别的身份徽章、图标和 fid 不匹配的图片 URL，并创建重新解析任务 |
+| `012_repair_videopicfeed_role_icons.sql` | 清理历史 `videopicfeed` 皇冠身份图标污染并重新创建真实图片解析任务 |
 
 迁移文件按 `NNN_name.sql` 命名。已经执行过的迁移不要修改；数据库结构继续变化时，应新增下一个编号的文件。
 
@@ -263,6 +270,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 - PostgreSQL
 - Chromium
 - Node.js/npm，仅用于构建或开发 Vue 前端
+- Linux 生产部署：systemd `240+` 和 logrotate
 - 可选：企业微信消息中转服务
 
 ## 快速开始
@@ -484,6 +492,8 @@ curl http://localhost:6001/metrics
 curl http://localhost:6001/api/monitor/status
 curl http://localhost:6001/api/groups
 curl 'http://localhost:6001/api/messages?limit=50&includeRaw=false'
+curl 'http://localhost:6001/api/groups/3/message-stats?yesterdayStart=2026-07-21T00%3A00%3A00%2B08%3A00&todayStart=2026-07-22T00%3A00%3A00%2B08%3A00&tomorrowStart=2026-07-23T00%3A00%3A00%2B08%3A00'
+curl -OJ 'http://localhost:6001/api/groups/3/messages/export?since=2026-07-22T00%3A00%3A00%2B08%3A00&before=2026-07-23T00%3A00%3A00%2B08%3A00&format=csv'
 curl http://localhost:6001/api/groups/3/history-sync
 curl 'http://localhost:6001/api/notification-rules?enabled=true'
 curl 'http://localhost:6001/api/notification-events?limit=50'
@@ -493,6 +503,10 @@ curl 'http://localhost:6001/api/notification-events?limit=50'
 - `/readyz`：检查数据库，并返回 monitor freshness、最后消息时间和通知积压。
 - `/healthz`：兼容入口，行为与 `/readyz` 相同。
 - `/metrics`：Prometheus 文本指标。
+- `/api/groups/{id}/message-stats`：用客户端传入的本地自然日边界统计今日和昨日成员消息。
+- `/api/groups/{id}/messages/export`：按 `[since, before)` 区间导出 `csv`、`json` 或 `md`。
+
+统计和导出只包含发送人微博 UID 为数字的真实成员消息，并排除 `system`、`event`、`recall` 及通用群聊事件；CSV 会对可能被表格软件识别为公式的单元格进行转义。
 
 创建消息回溯任务：
 
@@ -543,6 +557,8 @@ curl -X POST http://localhost:6001/api/notification-rules \
 
 生产 `info` 日志不输出群聊正文、群名和昵称，只记录稳定 ID、消息类型、正文长度和短 SHA-256。`LOG_LEVEL=debug` 会输出截断正文，只应在短期排查时启用。
 
+systemd 部署时，server 和 monitor 分别写入 `logs/server.log`、`logs/monitor.log`；安装脚本同时配置每日轮转、保留 14 份和旧日志压缩。frontend service 仍写入 journald。具体命令见 [systemd 长期运行与日志](./docs/4.systemd长期运行与日志.md)。
+
 ## 测试
 
 ```bash
@@ -558,7 +574,7 @@ bash -n scripts/*.sh
 - Chrome DevTools 端口必须只绑定 `127.0.0.1`。
 - `WEWORK_RELAY_API_KEY` 和数据库密码按密钥管理。
 - 当前 API 适合受控的 Tailscale/内网部署；暴露到不可信网络前应增加鉴权和严格 Origin 白名单。
-- 生产环境保持 `LOG_LEVEL=info`，并限制 journald 访问权限和保留周期。
+- 生产环境保持 `LOG_LEVEL=info`；项目 `logs/` 目录保持 `0750`、日志文件保持 `0640`，不要通过 Web 服务器暴露该目录。
 
 ## 文档
 

@@ -213,7 +213,7 @@ const monitorLabel = computed(() => {
 
 const monitorAlertMessage = computed(() => {
   if (monitor.value?.lastError) return monitor.value.lastError
-  return '开发环境请查看运行 monitor 命令的终端日志；systemd 部署时查看 weibo-assistant-monitor.service。'
+  return '开发环境请查看运行 monitor 命令的终端日志；systemd 部署时查看 logs/monitor.log。'
 })
 
 const monitorStatusTooltip = computed(() => {
@@ -346,13 +346,17 @@ async function runRefresh() {
 async function refreshMessages() {
   messagesLoading.value = true
   try {
-    const [result] = await Promise.all([listMessages({
+    const statsRequest = refreshDailyMessageStats().catch((err) => {
+      console.warn('refresh daily message stats failed', err)
+    })
+    const result = await listMessages({
       groupId: selectedGroupId.value || undefined,
       weiboSenderId: selectedSenderId.value || undefined,
       q: query.value.trim() || undefined,
       since: filterSince(timeRange.value),
       limit: 50
-    }), refreshDailyMessageStats()])
+    })
+    await statsRequest
     const items = result.items || []
     messages.value = items.filter(isDisplayableMessage)
     hasOlderMessages.value = items.length === 50
@@ -464,6 +468,12 @@ function isDisplayableMessage(message: Message) {
   return !/^微博群聊事件（类型 \d+）$/.test((message.content || '').trim())
 }
 
+function isCountableMemberMessage(message: Message) {
+  if (!/^\d+$/.test((message.weiboSenderId || '').trim())) return false
+  if (message.messageType === 'system' || message.messageType === 'event' || message.messageType === 'recall') return false
+  return !/^微博群聊事件（类型 \d+）$/.test((message.content || '').trim())
+}
+
 function sanitizeGroup(group: Group): Group {
   if (/^微博群聊事件（类型 \d+）$/.test((group.lastMessagePreview || '').trim())) {
     return { ...group, lastMessagePreview: '' }
@@ -568,7 +578,7 @@ function prependNotification(event: NotificationEvent) {
 
 function handleRealtimeEvent(event: RealtimeEvent) {
   if ((event.type === 'message_created' || event.type === 'message_updated') && event.message) {
-    if (event.type === 'message_created' && String(event.message.groupId) === String(selectedGroupId.value) && isDisplayableMessage(event.message)) {
+    if (event.type === 'message_created' && String(event.message.groupId) === String(selectedGroupId.value) && isCountableMemberMessage(event.message)) {
       const timestamp = new Date(event.message.sentAt || event.message.capturedAt).getTime()
       const boundaries = localDayBoundaries()
       if (timestamp >= new Date(boundaries.todayStart).getTime() && timestamp < new Date(boundaries.tomorrowStart).getTime()) {
@@ -917,9 +927,11 @@ async function exportMessages(request: MessageExportRequest) {
     const url = URL.createObjectURL(result.blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = request.filename
+    link.download = result.filename || request.filename
+    document.body.append(link)
     link.click()
-    URL.revokeObjectURL(url)
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
   } catch (err) {
     exportError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -958,7 +970,12 @@ watch(query, () => {
 
 onMounted(() => {
   clockTimer = window.setInterval(() => {
-    currentTime.value = new Date()
+    const previousDay = currentTime.value.toDateString()
+    const now = new Date()
+    currentTime.value = now
+    if (now.toDateString() !== previousDay) {
+      void refreshDailyMessageStats().catch((err) => console.warn('refresh daily message stats after midnight failed', err))
+    }
   }, 1000)
   refreshAll()
   connectRealtime()

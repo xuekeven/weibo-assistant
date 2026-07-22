@@ -36,3 +36,24 @@ func TestEncodeMessageExport(t *testing.T) {
 		t.Fatalf("unexpected Markdown export: error=%v type=%q content=%q", err, markdownType, string(markdownContent))
 	}
 }
+
+func TestEncodeMessageExportEscapesSpreadsheetFormulas(t *testing.T) {
+	message := store.ExportMessage{
+		WeiboMessageID: "=1+1",
+		GroupName:      "+group",
+		SenderName:     "@sender",
+		MessageType:    "\ttext",
+		Content:        "  -2+3",
+		SentAt:         time.Date(2026, 7, 22, 9, 30, 0, 0, time.UTC),
+	}
+
+	content, _, err := encodeMessageExport("csv", []store.ExportMessage{message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"'+group", "'@sender", "'\ttext", "'  -2+3", "'=1+1"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("CSV export does not neutralize %q: %q", want, string(content))
+		}
+	}
+}

@@ -9,7 +9,7 @@ User=__RUN_USER__
 Group=__RUN_GROUP__
 WorkingDirectory=__APP_DIR__
 Environment=APP_ENV=production
-Environment=HOME=/home/__RUN_USER__
+Environment=HOME=__RUN_HOME__
 EnvironmentFile=-__APP_DIR__/.env
 ExecStart=__APP_DIR__/bin/weibo-assistant monitor
 Restart=always
