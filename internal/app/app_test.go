@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -87,5 +88,24 @@ func TestNotificationRetryDelay(t *testing.T) {
 		if got := notificationRetryDelay(tt.attempt); got != tt.want {
 			t.Fatalf("notificationRetryDelay(%d) = %s, want %s", tt.attempt, got, tt.want)
 		}
+	}
+}
+
+func TestEnrichNetworkAttachmentsWithImageCacheHandlesEveryImage(t *testing.T) {
+	cache := newImageURLCache(time.Hour, 10)
+	cache.Set("fid-1", "https://example.test/image-1")
+	cache.Set("fid-2", "https://example.test/image-2")
+	attachments := []browser.NetworkAttachment{
+		{AttachmentType: "image", Meta: json.RawMessage(`{"fids":["fid-1"]}`)},
+		{AttachmentType: "image", Meta: json.RawMessage(`{"fids":["fid-2"]}`)},
+	}
+
+	enrichNetworkAttachmentsWithImageCache(attachments, cache)
+
+	if attachments[0].URL != "https://example.test/image-1" {
+		t.Fatalf("first URL = %q", attachments[0].URL)
+	}
+	if attachments[1].URL != "https://example.test/image-2" {
+		t.Fatalf("second URL = %q", attachments[1].URL)
 	}
 }

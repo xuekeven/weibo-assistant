@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { ArrowDownOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
-import HistorySyncDialog from './components/HistorySyncDialog.vue'
-import ManagementCenter, { type ManagementTab, type MessageExportRequest, type RuleForm } from './components/ManagementCenter.vue'
-import MessageDetail from './components/MessageDetail.vue'
 import MessageFilters from './components/MessageFilters.vue'
 import MessageItem from './components/MessageItem.vue'
-import RuleDialog from './components/RuleDialog.vue'
+import type { ManagementTab, MessageExportRequest, RuleForm } from './components/ManagementCenter.vue'
+import { useRealtimeConnection } from './composables/useRealtimeConnection'
 import { formatTime } from './utils/presentation'
+import { createLatestRequestGate } from './utils/requestGate'
 import {
   createHistorySync,
   createNotificationRule,
@@ -41,6 +40,11 @@ import {
   type RealtimeEvent,
   type User
 } from './api'
+
+const HistorySyncDialog = defineAsyncComponent(() => import('./components/HistorySyncDialog.vue'))
+const ManagementCenter = defineAsyncComponent(() => import('./components/ManagementCenter.vue'))
+const MessageDetail = defineAsyncComponent(() => import('./components/MessageDetail.vue'))
+const RuleDialog = defineAsyncComponent(() => import('./components/RuleDialog.vue'))
 
 const groups = ref<Group[]>([])
 const messages = ref<Message[]>([])
@@ -87,9 +91,12 @@ const unreadByGroup = ref<Record<number, number>>({})
 const newMessageCount = ref(0)
 const autoFollowMessages = ref(true)
 const messageListRef = ref<HTMLElement | null>(null)
-const realtimeStatus = ref('connecting')
 const currentTime = ref(new Date())
 const mediaResolutionRequests = new Set<number>()
+const messageRequests = createLatestRequestGate()
+const olderMessageRequests = createLatestRequestGate()
+const historyRequests = createLatestRequestGate()
+const detailRequests = createLatestRequestGate()
 const allSelectValue = '__all__'
 const antTheme = {
   token: {
@@ -143,6 +150,11 @@ const monitorStatusItems = [
     description: '无头 Chrome 已打开，正在进入微博聊天页。'
   },
   {
+    key: 'login_required',
+    label: '等待微博扫码登录',
+    description: '请查看企业微信中的登录提示和二维码截图；扫码成功后会自动恢复监听。'
+  },
+  {
     key: 'monitor_starting',
     label: '监控启动中',
     description: '监控进程正在启动，尚未完成页面监听。'
@@ -166,11 +178,8 @@ const monitorStatusLabels = Object.fromEntries(monitorStatusItems.map((item) => 
 
 let refreshInFlight = false
 let refreshAgain = false
-let socket: WebSocket | undefined
-let reconnectTimer: number | undefined
 let clockTimer: number | undefined
 let keywordSearchTimer: number | undefined
-let stopped = false
 let lastAutoHistoryBoundary = ''
 
 const selectedGroup = computed(() => {
@@ -200,6 +209,7 @@ const monitorTone = computed(() => {
   const status = monitor.value?.status || ''
   if (!monitorIsFresh.value) return 'bad'
   if (monitor.value?.lastError) return 'bad'
+  if (status === 'login_required') return 'bad'
   if (status.includes('ok') || status.includes('enabled') || status.includes('started') || status.includes('listening')) return 'good'
   if (status.includes('starting')) return 'warn'
   return 'idle'
@@ -214,10 +224,6 @@ const monitorLabel = computed(() => {
 const monitorAlertMessage = computed(() => {
   if (monitor.value?.lastError) return monitor.value.lastError
   return '开发环境请查看运行 monitor 命令的终端日志；systemd 部署时查看 logs/monitor.log。'
-})
-
-const monitorStatusTooltip = computed(() => {
-  return `共 ${monitorStatusItems.length} 种状态`
 })
 
 const monitorHeartbeatLabel = computed(() => {
@@ -344,25 +350,53 @@ async function runRefresh() {
 }
 
 async function refreshMessages() {
+  const requestKey = currentMessageRequestKey()
+  const request = messageRequests.begin(requestKey)
+  olderMessageRequests.invalidate()
+  loadingOlder.value = false
   messagesLoading.value = true
   try {
     const statsRequest = refreshDailyMessageStats().catch((err) => {
       console.warn('refresh daily message stats failed', err)
     })
+    const groupID = selectedGroupId.value || undefined
+    const senderID = selectedSenderId.value || undefined
+    const keyword = query.value.trim() || undefined
+    const since = filterSince(timeRange.value)
     const result = await listMessages({
-      groupId: selectedGroupId.value || undefined,
-      weiboSenderId: selectedSenderId.value || undefined,
-      q: query.value.trim() || undefined,
-      since: filterSince(timeRange.value),
+      groupId: groupID,
+      weiboSenderId: senderID,
+      q: keyword,
+      since,
       limit: 50
     })
     await statsRequest
+    if (!messageRequests.isCurrent(request, currentMessageRequestKey())) return
     const items = result.items || []
-    messages.value = items.filter(isDisplayableMessage)
+    const merged = new Map<number, Message>()
+    for (const message of items.filter(isDisplayableMessage)) merged.set(message.id, message)
+    for (const message of messages.value) {
+      if (messageMatchesCurrentFilters(message)) merged.set(message.id, message)
+    }
+    messages.value = [...merged.values()]
+      .sort((a, b) => new Date(b.sentAt || b.capturedAt).getTime() - new Date(a.sentAt || a.capturedAt).getTime())
+      .slice(0, 80)
     hasOlderMessages.value = items.length === 50
   } finally {
-    messagesLoading.value = false
+    if (messageRequests.isCurrent(request, currentMessageRequestKey())) {
+      messagesLoading.value = false
+    }
   }
+}
+
+function currentMessageRequestKey() {
+  return JSON.stringify({
+    groupID: selectedGroupId.value,
+    senderID: selectedSenderId.value,
+    query: query.value.trim(),
+    timeRange: timeRange.value,
+    customDate: customDate.value
+  })
 }
 
 function localDayBoundaries() {
@@ -390,11 +424,17 @@ async function refreshDailyMessageStats() {
 }
 
 async function refreshHistorySync() {
-  if (!selectedGroupId.value) {
+  const groupID = selectedGroupId.value
+  const requestKey = String(groupID || '')
+  const request = historyRequests.begin(requestKey)
+  if (!groupID) {
     historyJob.value = null
     return
   }
-  historyJob.value = (await getHistorySync(selectedGroupId.value)).job
+  const job = (await getHistorySync(groupID)).job
+  if (historyRequests.isCurrent(request, String(selectedGroupId.value || ''))) {
+    historyJob.value = job
+  }
 }
 
 async function applyFilters() {
@@ -434,6 +474,11 @@ async function clearFilter(key: string) {
 
 async function selectGroup(group: Group) {
   selectedGroupId.value = group.id
+  messages.value = []
+  historyJob.value = null
+  messageRequests.invalidate()
+  olderMessageRequests.invalidate()
+  historyRequests.invalidate()
   unreadByGroup.value[group.id] = 0
   newMessageCount.value = 0
   updateDocumentTitle()
@@ -612,31 +657,12 @@ function handleRealtimeEvent(event: RealtimeEvent) {
   }
 }
 
-function connectRealtime() {
-  if (stopped) return
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return
-  realtimeStatus.value = 'connecting'
-  socket = createRealtimeSocket()
-  socket.addEventListener('open', () => {
-    realtimeStatus.value = 'connected'
-  })
-  socket.addEventListener('message', (event) => {
-    try {
-      handleRealtimeEvent(JSON.parse(event.data) as RealtimeEvent)
-    } catch (err) {
-      console.warn('parse realtime event failed', err)
-    }
-  })
-  socket.addEventListener('close', () => {
-    realtimeStatus.value = 'disconnected'
-    if (stopped) return
-    refreshAll()
-    reconnectTimer = window.setTimeout(connectRealtime, 3000)
-  })
-  socket.addEventListener('error', () => {
-    realtimeStatus.value = 'error'
-  })
-}
+const {
+  status: realtimeStatus,
+  connect: connectRealtime
+} = useRealtimeConnection(createRealtimeSocket, handleRealtimeEvent, () => {
+  void refreshAll()
+})
 
 function isNearMessageBottom(threshold = 120) {
   const element = messageListRef.value
@@ -674,10 +700,6 @@ function handleMessageMediaLoaded() {
   }
 }
 
-function formatMessageTime(value?: string) {
-  return formatTime(value, { seconds: false, now: currentTime.value })
-}
-
 function filterSince(range: string) {
   const durations: Record<string, number> = {
     '24h': 24 * 60 * 60 * 1000,
@@ -710,6 +732,8 @@ async function loadOlderMessages(triggerRemote = true) {
   const element = messageListRef.value
   const oldHeight = element?.scrollHeight || 0
   const oldest = orderedMessages.value[0]
+  const requestKey = `${currentMessageRequestKey()}:${oldest?.id || ''}`
+  const request = olderMessageRequests.begin(requestKey)
   loadingOlder.value = true
   try {
     const result = await listMessages({
@@ -720,6 +744,7 @@ async function loadOlderMessages(triggerRemote = true) {
       before: oldest?.sentAt || oldest?.capturedAt,
       limit: 50
     })
+    if (!olderMessageRequests.isCurrent(request, `${currentMessageRequestKey()}:${oldest?.id || ''}`)) return
     const rawOlder = result.items || []
     const older = rawOlder.filter(isDisplayableMessage)
     const existing = new Set(messages.value.map((message) => message.id))
@@ -733,7 +758,9 @@ async function loadOlderMessages(triggerRemote = true) {
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
-    loadingOlder.value = false
+    if (olderMessageRequests.isCurrent(request, `${currentMessageRequestKey()}:${oldest?.id || ''}`)) {
+      loadingOlder.value = false
+    }
   }
 }
 
@@ -844,9 +871,14 @@ async function copyMessageContent(message: Message) {
 }
 
 async function openMessageDetails(message: Message) {
+  const requestKey = String(message.id)
+  const request = detailRequests.begin(requestKey)
   selectedMessage.value = message
   try {
-    selectedMessage.value = await getMessage(message.id, true)
+    const detail = await getMessage(message.id, true)
+    if (detailRequests.isCurrent(request, String(selectedMessage.value?.id || ''))) {
+      selectedMessage.value = detail
+    }
   } catch {
     // 列表数据足以展示基础详情；原始数据加载失败不阻止详情面板打开。
   }
@@ -982,11 +1014,12 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  stopped = true
-  if (reconnectTimer) window.clearTimeout(reconnectTimer)
+  messageRequests.invalidate()
+  olderMessageRequests.invalidate()
+  historyRequests.invalidate()
+  detailRequests.invalidate()
   if (clockTimer) window.clearInterval(clockTimer)
   window.clearTimeout(keywordSearchTimer)
-  socket?.close()
 })
 </script>
 

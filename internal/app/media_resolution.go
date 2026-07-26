@@ -85,6 +85,6 @@ func resolveImageFID(ctx context.Context, st *store.Store, imageURLByFID *imageU
 	if err != nil {
 		return 0, err
 	}
-	slog.Info("image attachment resolved from metadata", "fid", fid, "url", imageURL, "updated", count)
+	slog.Info("image attachment resolved from metadata", "fid", fid, "resource", mediaURLLogValue(imageURL), "updated", count)
 	return count, nil
 }

@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,8 +107,62 @@ func TestCORSAllowsRuleDeletionAndExposesDownloadFilename(t *testing.T) {
 	if methods := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, "DELETE") {
 		t.Fatalf("Access-Control-Allow-Methods = %q, want DELETE", methods)
 	}
-	if exposed := response.Header().Get("Access-Control-Expose-Headers"); exposed != "Content-Disposition" {
+	if exposed := response.Header().Get("Access-Control-Expose-Headers"); exposed != "Content-Disposition, X-Request-ID" {
 		t.Fatalf("Access-Control-Expose-Headers = %q", exposed)
+	}
+}
+
+func TestCORSSupportsTailscaleIPAndRejectsPublicOriginsByDefault(t *testing.T) {
+	server := NewServer(config.Config{AppEnv: "production", FrontendPort: 6002}, nil, nil)
+	for _, test := range []struct {
+		origin string
+		want   bool
+	}{
+		{origin: "http://100.80.90.100:6002", want: true},
+		{origin: "http://192.168.1.10:6002", want: true},
+		{origin: "https://server.example.com:6002", want: false},
+	} {
+		if got := server.isAllowedOrigin(test.origin); got != test.want {
+			t.Fatalf("isAllowedOrigin(%q) = %v, want %v", test.origin, got, test.want)
+		}
+	}
+}
+
+func TestServerUsesConfiguredTailscaleBindAddress(t *testing.T) {
+	server := NewServer(config.Config{
+		BackendBindAddr: "100.108.244.64",
+		BackendPort:     6001,
+	}, nil, nil)
+	if got := server.Addr(); got != "100.108.244.64:6001" {
+		t.Fatalf("server address = %q", got)
+	}
+}
+
+func TestWriteErrorHidesInternalDetails(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	response := httptest.NewRecorder()
+	response.Header().Set("X-Request-ID", "request-123")
+	writeError(response, http.StatusInternalServerError, errors.New("postgresql://user:secret@db.internal/app?token=abc api_key=private"))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("internal error leaked: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "request-123") {
+		t.Fatalf("request id missing: %s", response.Body.String())
+	}
+	if strings.Contains(logs.String(), "secret") || strings.Contains(logs.String(), "private") || strings.Contains(logs.String(), "token=abc") {
+		t.Fatalf("sensitive error detail leaked to log: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "db.internal/app") || !strings.Contains(logs.String(), "request-123") {
+		t.Fatalf("useful error context missing from log: %s", logs.String())
 	}
 }
 
@@ -119,5 +176,14 @@ func TestMonitorFreshness(t *testing.T) {
 	fresh, age = monitorFreshness(store.MonitorStatus{}, now, time.Minute)
 	if fresh || age != -1 {
 		t.Fatalf("missing heartbeat should be stale: fresh=%v age=%d", fresh, age)
+	}
+}
+
+func TestReadinessStatusRequiresFreshMonitor(t *testing.T) {
+	if status, label := readinessHTTPStatus(false); status != http.StatusServiceUnavailable || label != "not_ready" {
+		t.Fatalf("stale monitor readiness = %d %q", status, label)
+	}
+	if status, label := readinessHTTPStatus(true); status != http.StatusOK || label != "ready" {
+		t.Fatalf("fresh monitor readiness = %d %q", status, label)
 	}
 }

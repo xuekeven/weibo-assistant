@@ -161,8 +161,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const text = await response.text()
       let message = text
       try {
-        const parsed = JSON.parse(text) as { error?: string }
+        const parsed = JSON.parse(text) as { error?: string; requestId?: string }
         message = parsed.error || text
+        if (parsed.requestId) message += `（请求 ID：${parsed.requestId}）`
       } catch {
         // 非 JSON 错误响应直接展示原始文本。
       }
@@ -172,7 +173,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return response.json() as Promise<T>
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(`请求后端超时：${API_BASE}${path}`)
+      throw new Error(`请求后端超时：${API_BASE}${path}`, { cause: err })
     }
     throw err
   } finally {
@@ -232,8 +233,9 @@ export async function downloadGroupMessages(groupId: number, params: {
       const text = await response.text()
       let message = text
       try {
-        const parsed = JSON.parse(text) as { error?: string }
+        const parsed = JSON.parse(text) as { error?: string; requestId?: string }
         message = parsed.error || text
+        if (parsed.requestId) message += `（请求 ID：${parsed.requestId}）`
       } catch {
         // 非 JSON 错误响应直接显示原文。
       }
@@ -243,7 +245,9 @@ export async function downloadGroupMessages(groupId: number, params: {
     const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `weibo-messages.${params.format}`
     return { blob: await response.blob(), filename }
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') throw new Error('导出请求超时')
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('导出请求超时', { cause: err })
+    }
     throw err
   } finally {
     window.clearTimeout(timeout)

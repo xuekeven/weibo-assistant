@@ -4,18 +4,9 @@
 
 ## 目录
 
-- [已实现能力](#已实现能力)
+- [当前能力](#当前能力)
+  - [消息补偿与消息回溯](#消息补偿与消息回溯)
 - [运行架构](#运行架构)
-- [消息补偿与消息回溯](#消息补偿与消息回溯)
-- [项目结构](#项目结构)
-  - [根目录文件和运行时目录](#根目录文件和运行时目录)
-  - [Go 程序入口](#go-程序入口)
-  - [后端源码 internal](#后端源码-internal)
-  - [Vue 前端 frontend](#vue-前端-frontend)
-  - [数据库迁移 migrations](#数据库迁移-migrations)
-  - [部署模板和运维脚本](#部署模板和运维脚本)
-  - [文档目录 docs](#文档目录-docs)
-  - [推荐阅读顺序](#推荐阅读顺序)
 - [环境要求](#环境要求)
 - [快速开始](#快速开始)
 - [常用配置](#常用配置)
@@ -32,9 +23,10 @@
 - [文档](#文档)
 - [已知限制](#已知限制)
 
-## 已实现能力
+## 当前能力
 
 - Chrome/Chromium 持久化登录态和无头运行。
+- monitor 自动识别登录失效，优先从 DOM 读取微博二维码原图并通过企业微信发送；扫码后自动恢复监听。
 - 微博 WebSocket 消息解析、图片附件识别与 URL 补全。
 - monitor 启动补偿、WebSocket 断线补漏和按时间范围回溯历史消息。
 - PostgreSQL 消息、群组、用户、附件和监控状态存储。
@@ -47,28 +39,7 @@
 - systemd 常驻部署和 Go 静态前端服务。
 - 带版本、校验和与事务锁的数据库迁移。
 
-## 运行架构
-
-```text
-Chrome 微博群聊页
-  -> CDP Network/WebSocket
-  -> 消息解析
-  -> PostgreSQL 事务写入
-       -> notification_outbox
-       -> pg_notify
-
-monitor worker -> 企业微信中转服务
-server API     -> PostgreSQL -> 浏览器 WebSocket
-frontend       -> server API / WebSocket
-```
-
-生产环境通常运行三个进程：
-
-- `server`：API、健康检查、指标和前端 WebSocket，默认端口 `6001`。
-- `monitor`：Chrome、微博消息监听、入库和通知 worker。
-- `frontend`：托管 `frontend/dist`，默认端口 `6002`。
-
-## 消息补偿与消息回溯
+### 消息补偿与消息回溯
 
 实时 WebSocket 负责低延迟接收，微博 `query_messages.json` 历史接口负责补偿和消息回溯。三种同步统一由 monitor 执行，并复用当前 Chrome 登录态：
 
@@ -89,180 +60,27 @@ frontend       -> server API / WebSocket
 
 消息列表向上翻到本地最早记录后，也会自动创建一个单页历史同步任务。任务只有在 monitor 正常运行且已经取得微博聊天页 CDP target 时才会执行；页面显示“等待 monitor”时，应检查 monitor 服务和微博登录态。
 
-## 项目结构
-
-下面只列出需要理解和维护的文件。`node_modules`、Go 缓存以及 Chrome 内部生成的大量文件没有展开。
+## 运行架构
 
 ```text
-weibo-assistant/
-├── cmd/weibo-assistant/       Go 程序入口
-├── internal/                  后端业务源码
-│   ├── app/                   组装并启动各个服务
-│   ├── browser/               Chrome、CDP 和微博消息采集
-│   ├── config/                环境变量加载与校验
-│   ├── httpapi/               HTTP API、健康检查和 WebSocket
-│   ├── migrate/               数据库迁移执行器
-│   ├── notifier/              企业微信中继客户端
-│   └── store/                 PostgreSQL 数据访问和事务
-├── frontend/                  Vue 前端工程
-│   ├── src/                   Vue/TypeScript 源码
-│   └── dist/                  前端生产构建产物
-├── migrations/                PostgreSQL 版本化迁移 SQL
-├── deploy/systemd/            systemd service 模板
-├── deploy/logrotate/           server/monitor 日志轮转模板
-├── scripts/                   构建、安装和运维脚本
-├── docs/                      架构、数据库和部署文档
-├── bin/                       Go 编译产物
-├── .weibo-profile/            Chrome 登录态和用户数据
-├── logs/                      server/monitor 运行日志
-├── .env                       当前环境的私密配置
-├── .env.example               可提交的配置示例
-├── go.mod / go.sum            Go 模块及依赖版本
-├── README.md                  项目入口文档
-└── CHANGELOG.md               重要变更记录
+Chrome 微博群聊页
+  -> CDP Network/WebSocket
+  -> 消息解析
+  -> PostgreSQL 事务写入
+       -> notification_outbox
+       -> pg_notify
+
+monitor worker -> 企业微信中转服务
+login page    -> CDP 读取二维码原图 -> 企业微信文字 + PNG 登录提醒
+server API     -> PostgreSQL -> 浏览器 WebSocket
+frontend       -> server API / WebSocket
 ```
 
-### 根目录文件和运行时目录
+生产环境通常运行三个进程：
 
-| 路径 | 作用 | 是否手动维护 |
-| --- | --- | --- |
-| `README.md` | 快速开始、配置、构建、运行和部署入口 | 是 |
-| `CHANGELOG.md` | 记录新增、修改、修复和安全变化 | 是 |
-| `.env.example` | 环境变量模板，只放示例值和说明 | 是 |
-| `.env` | 当前机器的数据库密码、通知密钥和运行参数 | 是，但禁止提交 |
-| `.gitignore` | 指定 Git 不应跟踪的私密文件、缓存和构建产物 | 是 |
-| `go.mod` | 声明 Go 模块名、Go 版本和直接依赖 | 通过 Go 命令维护 |
-| `go.sum` | 锁定依赖内容校验和，保证依赖下载一致 | 通过 Go 命令维护 |
-| `bin/weibo-assistant` | `build-linux.sh` 生成的 Go 可执行文件 | 否，可重新构建 |
-| `.weibo-profile/` | Chrome Cookie、localStorage 和微博登录状态 | 否，私密且禁止提交 |
-| `logs/` | systemd 部署后生成的 server、monitor 日志与轮转文件 | 否，由服务和 logrotate 维护 |
-| `.gomodcache/` | 本地 Go 依赖缓存 | 否，可删除后重新生成 |
-
-`.env` 和 `.weibo-profile/` 都可能包含账号凭证。复制、备份和设置服务器权限时应把它们当作密钥处理。
-
-### Go 程序入口
-
-| 文件 | 作用 |
-| --- | --- |
-| `cmd/weibo-assistant/main.go` | 读取 `server`、`monitor`、`frontend`、`migrate`、`login` 子命令，加载配置，处理退出信号并调用 `internal/app` |
-
-项目只生成一个 `bin/weibo-assistant`，五个子命令共享同一个入口。`cmd` 目录只负责启动，不应放具体的 SQL、HTTP handler 或微博解析逻辑。
-
-### 后端源码 internal
-
-Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前项目内部代码导入，不能被其他仓库直接当成公共库使用。
-
-| 目录或文件 | 作用 |
-| --- | --- |
-| `internal/app/app.go` | 应用装配层；创建数据库、API、monitor、指标上报和通知 worker，并处理优雅退出 |
-| `internal/app/frontend.go` | 用 Go HTTP 服务托管 `frontend/dist`，包含单页应用路由回退 |
-| `internal/app/image_cache.go` | 保存图片 FID 到 URL 的有界 TTL 缓存 |
-| `internal/app/history_sync.go` | 执行启动补偿、断线补漏和消息回溯任务，控制分页及停止边界 |
-| `internal/app/metrics.go` | 收集 monitor 进程指标并定期写入 PostgreSQL |
-| `internal/browser/login.go` | 使用持久化 profile 打开 Chrome，供首次微博登录 |
-| `internal/browser/monitor.go` | 启动 Chrome、探测页面、选择目标群、监听网络事件、解析消息并负责 CDP 自动重连 |
-| `internal/browser/cdp.go` | 实现与 Chrome DevTools Protocol WebSocket 的连接、请求和帧读写 |
-| `internal/browser/history.go` | 通过已登录页面请求微博历史接口并解析为统一消息模型 |
-| `internal/config/config.go` | 从 `.env` 和系统环境变量读取配置，并按子命令分别校验 |
-| `internal/httpapi/server.go` | 注册 API、健康检查、指标和开发路由，配置 CORS |
-| `internal/httpapi/messages.go` | 群组、用户、消息、通知规则和通知事件的 HTTP handler |
-| `internal/httpapi/history_sync.go` | 创建和查询历史同步任务的 HTTP handler |
-| `internal/httpapi/message_exports.go` | 成员消息的自然日统计和 CSV、JSON、Markdown 导出 handler |
-| `internal/httpapi/realtime.go` | 监听 PostgreSQL `LISTEN/NOTIFY` 并转换为前端实时事件 |
-| `internal/httpapi/websocket.go` | 管理浏览器 WebSocket 客户端、握手、帧读取和广播 |
-| `internal/migrate/migrate.go` | 按版本执行 `migrations/*.sql`，校验 SHA-256 并防止并发迁移 |
-| `internal/notifier/wework.go` | 调用企业微信中继服务；重试调度由 app/outbox worker 负责 |
-| `internal/store/store.go` | 创建 PostgreSQL 连接池、封装事务、monitor 状态和实时事件 |
-| `internal/store/messages.go` | 群组、用户、消息和附件的查询、事务写入及数据库幂等去重 |
-| `internal/store/history_sync.go` | 历史同步任务入队、领取、进度、完成状态和消息边界查询 |
-| `internal/store/message_exports.go` | 成员消息统计和按时间区间导出查询 |
-| `internal/store/notifications.go` | 通知规则匹配和通知事件查询 |
-| `internal/store/outbox.go` | 通知任务入队、并发安全领取、成功和失败状态更新 |
-| `internal/store/observability.go` | 运行指标、通知积压和最后消息时间的数据库读写 |
-| `internal/**/*_test.go` | 与相邻实现对应的 Go 自动化测试，不参与生产二进制运行 |
-| `internal/*/doc.go` | 每个包的职责说明，便于 Go 文档工具展示 |
-
-`internal/app` 是各层的连接点：`browser` 采集消息，`store` 保存消息，`notifier` 调用第三方接口，`httpapi` 向前端提供数据。各底层包之间尽量不相互依赖。
-
-### Vue 前端 frontend
-
-| 文件或目录 | 作用 |
-| --- | --- |
-| `frontend/package.json` | npm 脚本和前端依赖声明 |
-| `frontend/package-lock.json` | 锁定 npm 依赖版本，部署时应一并提交 |
-| `frontend/vite.config.ts` | Vite 开发和构建配置 |
-| `frontend/tsconfig.json` | TypeScript 编译配置 |
-| `frontend/index.html` | Vite HTML 入口 |
-| `frontend/src/main.ts` | 创建并挂载 Vue 应用 |
-| `frontend/src/App.vue` | 页面数据、WebSocket 和跨组件状态编排 |
-| `frontend/src/components/` | 群聊侧栏、筛选栏、消息、管理中心和消息详情组件 |
-| `frontend/src/components/HistorySyncDialog.vue` | 历史消息时间范围选择和任务进度弹窗 |
-| `frontend/src/utils/presentation.ts` | 共享时间、头像颜色和状态文案格式化 |
-| `frontend/src/api.ts` | 后端 API、WebSocket 地址和请求封装 |
-| `frontend/src/styles.css` | 全局页面样式 |
-| `frontend/src/vite-env.d.ts` | Vite 环境变量的 TypeScript 类型声明 |
-| `frontend/dist/` | `npm run build` 生成的 HTML、JavaScript 和 CSS，禁止手动修改 |
-| `frontend/node_modules/` | npm 下载的依赖，禁止提交，可重新安装 |
-
-开发时由 Node.js/Vite 运行 `frontend/src`；生产时 Node.js 先构建出 `frontend/dist`，再由 Go `frontend` 子命令或 Nginx 托管。
-
-前端使用 Ant Design Vue `4.2.6` 和 `@ant-design/icons-vue`，日期计算使用 Day.js；`src/main.ts` 统一注册页面使用的组件，视觉细节由 `src/styles.css` 管理。
-
-### 数据库迁移 migrations
-
-| 文件 | 作用 |
-| --- | --- |
-| `001_init.sql` | 创建群组、用户、消息、附件、通知规则、通知事件和 monitor 状态等基础表与索引 |
-| `002_notification_outbox.sql` | 增加企业微信异步通知任务表及待处理、超时任务索引 |
-| `003_notification_rule_matching.sql` | 扩展通知规则匹配字段和约束 |
-| `004_observability_metrics.sql` | 增加跨进程 monitor 运行指标表 |
-| `005_notification_rule_archive.sql` | 为通知规则增加安全归档字段和活动规则索引 |
-| `006_stable_weibo_message_id.sql` | 规范微博消息 ID 并加强稳定去重 |
-| `007_classify_generic_groupchat_events.sql` | 规范通用群聊事件的消息类型 |
-| `008_history_sync_jobs.sql` | 增加历史同步任务队列、进度和单群活动任务约束 |
-| `009_generalize_missing_media_url_status.sql` | 将缺少媒体 URL 的状态统一为与消息来源无关的名称 |
-| `010_media_resolution_jobs.sql` | 增加由前端请求、monitor 使用登录态消费的图片 FID 解析任务队列 |
-| `011_repair_decorative_image_attachments.sql` | 清除误识别的身份徽章、图标和 fid 不匹配的图片 URL，并创建重新解析任务 |
-| `012_repair_videopicfeed_role_icons.sql` | 清理历史 `videopicfeed` 皇冠身份图标污染并重新创建真实图片解析任务 |
-
-迁移文件按 `NNN_name.sql` 命名。已经执行过的迁移不要修改；数据库结构继续变化时，应新增下一个编号的文件。
-
-### 部署模板和运维脚本
-
-| 文件 | 作用 |
-| --- | --- |
-| `deploy/systemd/weibo-assistant-server.service` | API server 的 systemd 模板 |
-| `deploy/systemd/weibo-assistant-monitor.service` | Chrome monitor 的 systemd 模板 |
-| `deploy/systemd/weibo-assistant-frontend.service` | Go 静态前端服务的 systemd 模板 |
-| `deploy/logrotate/weibo-assistant` | server 和 monitor 项目日志的轮转模板 |
-| `scripts/build-linux.sh` | 编译 Go，并安装、构建 Vue 前端 |
-| `scripts/install-systemd.sh` | 将路径和运行用户写入模板，安装到 `/etc/systemd/system` |
-| `scripts/systemd-status.sh` | 查看一个或全部项目服务的 systemd 状态 |
-| `scripts/systemd-logs.sh` | 查看并跟随 server、monitor 项目日志或 frontend journal |
-
-### 文档目录 docs
-
-| 文件 | 作用 |
-| --- | --- |
-| `1.技术方案.md` | 当前架构、数据流、可靠性和安全边界 |
-| `2.PostgreSQL常用命令.md` | PostgreSQL 查询、诊断、备份和恢复 |
-| `3.PostgreSQL部署教程.md` | 数据库、用户、权限和连接配置 |
-| `4.systemd长期运行与日志.md` | Linux 构建、部署、systemd 管理和排障 |
-| `5.优化建议.md` | 尚未完成的后续改进事项 |
-| `6.后端代码导读.md` | 面向前端开发者的 Go 后端阅读顺序和基础概念 |
-
-### 推荐阅读顺序
-
-如果准备从前端逐步学习后端，建议按下面的顺序阅读：
-
-1. `cmd/weibo-assistant/main.go`：理解程序入口和子命令。
-2. `internal/config/config.go`：理解服务依赖的环境变量。
-3. `internal/app/app.go`：理解各个包怎样组合成进程。
-4. `internal/httpapi/server.go` 和 `messages.go`：理解一次 HTTP 请求。
-5. `internal/store/store.go` 和 `messages.go`：理解连接池、SQL 和事务。
-6. `internal/store/outbox.go`：理解可靠异步任务。
-7. `internal/browser/monitor.go`：最后阅读复杂度最高的 Chrome/CDP 采集流程。
-8. 对照相邻的 `*_test.go`，观察每个行为如何验证。
+- `server`：API、健康检查、指标和前端 WebSocket，默认端口 `6001`。
+- `monitor`：Chrome、微博消息监听、入库和通知 worker。
+- `frontend`：托管 `frontend/dist`，默认端口 `6002`。
 
 ## 环境要求
 
@@ -271,7 +89,7 @@ Go 的 `internal` 目录具有语言级访问限制：这些包只能被当前�
 - Chromium
 - Node.js/npm，仅用于构建或开发 Vue 前端
 - Linux 生产部署：systemd `240+` 和 logrotate
-- 可选：企业微信消息中转服务
+- 企业微信消息中转服务；自动发送登录二维码时必需
 
 ## 快速开始
 
@@ -287,17 +105,15 @@ cp .env.example .env
 DATABASE_URL=postgresql://用户名:密码@127.0.0.1:5432/weibo_data
 ```
 
-如需通知，再配置：
+自动发送登录二维码和企业微信消息需要配置：
 
 ```env
-TARGET_GROUP_ID=
-TARGET_SENDER_ID=
 WEWORK_RELAY_URL=http://你的中转服务:5001
 WEWORK_RELAY_API_KEY=
 WEWORK_RELAY_TOUSER=
 ```
 
-微博原始 ID 比群名和昵称稳定，建议优先配置 ID。
+如需用环境变量创建默认消息通知规则，再配置 `TARGET_GROUP_ID` 和 `TARGET_SENDER_ID`。微博原始 ID 比群名和昵称稳定，建议优先配置 ID。
 
 ### 2. 执行迁移
 
@@ -307,26 +123,31 @@ go run ./cmd/weibo-assistant migrate
 
 迁移记录保存在 `schema_migrations`。同一版本只执行一次；已执行 SQL 的 SHA-256 发生变化时会拒绝继续迁移。
 
-### 3. 首次登录微博
+### 3. 启动 monitor 并登录微博
 
 ```bash
-HEADLESS=false go run ./cmd/weibo-assistant login
+go run ./cmd/weibo-assistant monitor
 ```
 
-登录后关闭浏览器，Cookie、localStorage 等状态保存在 `WEIBO_PROFILE_DIR`，默认 `.weibo-profile`。
+项目不再提供独立的 `login` 命令。monitor 会使用 `WEIBO_PROFILE_DIR` 启动 Chrome；首次启动或登录失效时，它会：
+
+1. 将状态更新为 `login_required`。
+2. 在 DOM 中定位二维码 `<img>`，通过 Chrome DevTools Protocol 读取其原始图片资源；读取失败时才降级为关闭提示弹层后截图。
+3. 调用企业微信中转接口，先发送文字登录提示，再发送二维码 PNG 图片。
+4. 保持 Chrome 和 monitor 运行，等待用户用微博 App 扫码。
+5. 检测到登录成功后，自动选择目标群并恢复消息监听。
+
+这个流程支持纯命令行 Linux 服务器和 `HEADLESS=true`，不需要 VNC、远程桌面或物理显示器。登录态保存在 `WEIBO_PROFILE_DIR`，默认 `.weibo-profile`；不要把它提交到 Git。
 
 ### 4. 本地开发
 
-分别在三个终端启动 API、monitor 和 Vue 开发服务器：
+保持上一步的 monitor 运行，再分别启动 API 和 Vue 开发服务器：
 
 ```bash
 # 终端 1
 go run ./cmd/weibo-assistant server
 
 # 终端 2
-go run ./cmd/weibo-assistant monitor
-
-# 终端 3
 npm --prefix frontend install
 npm --prefix frontend run dev
 ```
@@ -342,21 +163,30 @@ npm --prefix frontend run dev
 | `APP_ENV` | `development` | `production` 时关闭开发消息接口 |
 | `DATABASE_URL` | 无 | PostgreSQL 连接串，必填 |
 | `BACKEND_PORT` | `6001` | API 端口 |
+| `BACKEND_BIND_ADDRESS` | `0.0.0.0` | API 监听 IP；可填写本机 Tailscale `100.x` 地址收窄范围 |
 | `FRONTEND_PORT` | `6002` | 前端静态服务和 CORS 端口 |
+| `FRONTEND_BIND_ADDRESS` | `0.0.0.0` | 前端静态服务监听 IP |
 | `FRONTEND_DIST_DIR` | `frontend/dist` | Vue 构建产物目录 |
+| `CORS_ALLOWED_ORIGINS` | 空 | 额外允许的完整 Origin，逗号分隔；留空时支持 localhost、私有 IP、Tailscale IP 和 `*.ts.net` |
 | `WEIBO_PROFILE_DIR` | `.weibo-profile` | Chrome 登录态目录 |
 | `HEADLESS` | `true` | monitor 是否无头运行 |
 | `CHROME_DEBUG_PORT` | `9222` | 仅本机使用的 CDP 端口 |
 | `TARGET_GROUP_ID` | 空 | 默认规则的微博群 ID |
 | `TARGET_SENDER_ID` | 空 | 默认规则的微博发送人 ID |
+| `WEWORK_RELAY_URL` | 项目默认中转地址 | 企业微信中转服务地址；登录二维码通知必需 |
+| `WEWORK_RELAY_API_KEY` | 空 | 企业微信中转鉴权密钥；登录二维码通知必需 |
+| `WEWORK_RELAY_TOUSER` | 空 | 接收登录二维码和消息通知的企业微信 userid；空表示由中转服务使用默认接收人 |
 | `NOTIFICATION_MAX_ATTEMPTS` | `8` | 通知最大尝试次数 |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `60` | monitor 每隔多少秒检查一次 Chrome、微博页面和目标群状态，并把本次心跳写入数据库 |
 | `MONITOR_STALE_AFTER_SECONDS` | `180` | server 多久没有看到新的 monitor 心跳后，将 monitor 判定为 stale（可能卡死或已退出） |
+| `LOGIN_QR_REFRESH_SECONDS` | `120` | 未登录时重新检查二维码的间隔；只在二维码内容变化后重新发送图片 |
 | `IMAGE_CACHE_TTL_SECONDS` | `86400` | 图片 URL 缓存 TTL |
 | `IMAGE_CACHE_MAX_ITEMS` | `1000` | 图片 URL 缓存上限 |
 | `LOG_LEVEL` | `info` | `debug/info/warn/error` |
 
 心跳和新消息是两个独立概念。只要 monitor 正常运行，它即使没有采集到新消息，也会每隔 `HEALTH_CHECK_INTERVAL_SECONDS` 更新一次心跳。因此群聊连续数小时没有新消息不会触发 stale；只有心跳本身超过 `MONITOR_STALE_AFTER_SECONDS` 没有更新，才会被认为异常。`lastMessageAt` 仅用于展示最后一次收到消息的时间，不参与健康判断。
+
+前后端默认监听 `0.0.0.0`，可以直接通过 `http://<Tailscale-IP>:6002` 或 MagicDNS 主机名访问；前端会使用当前主机的 `6001` 端口调用 API。若希望进程只接受 Tailscale 流量，可把两个 bind 配置都设置为本机的 Tailscale `100.x` 地址，并配合主机防火墙限制 `6001/6002`。当前 API 不带应用层鉴权，不应暴露到公网。
 
 ## 构建与运行
 
@@ -394,19 +224,17 @@ frontend/dist/       Vue 生产静态文件
 
 ```bash
 ./bin/weibo-assistant migrate
-./bin/weibo-assistant login
 ./bin/weibo-assistant server
 ./bin/weibo-assistant monitor
 ./bin/weibo-assistant frontend
 ```
 
 - `migrate`：连接 PostgreSQL，执行尚未应用的 `migrations/*.sql`，并记录到 `schema_migrations`。
-- `login`：打开 Chrome 供你手动登录微博，并将登录状态保存到 `WEIBO_PROFILE_DIR`。
 - `server`：启动 API、健康检查、Prometheus 指标和实时 WebSocket，默认端口 `6001`。
-- `monitor`：启动 Chrome、CDP 消息监听、数据库写入和通知 worker。
+- `monitor`：启动 Chrome、处理二维码登录、CDP 消息监听、数据库写入和通知 worker。
 - `frontend`：用 Go HTTP 服务托管已经构建好的 `frontend/dist`，默认端口 `6002`。
 
-这些是同一个二进制的不同子命令，不是五套程序。`server`、`monitor` 和 `frontend` 是三个长期运行的进程，手动运行时需要三个终端，生产环境则分别交给三个 systemd 服务。
+这些是同一个二进制的不同子命令，不是四套程序。`server`、`monitor` 和 `frontend` 是三个长期运行的进程，手动运行时需要三个终端，生产环境则分别交给三个 systemd 服务。
 
 ### 3. Vue 为什么构建时用 Node.js，运行时用 Go
 
@@ -453,8 +281,6 @@ npm --prefix frontend run dev
 ```bash
 ./scripts/build-linux.sh
 ./bin/weibo-assistant migrate
-# 首次登录或登录失效时执行：
-HEADLESS=false ./bin/weibo-assistant login
 
 sudo APP_DIR="$HOME/repos/weibo-assistant" \
   RUN_USER="$(id -un)" \
@@ -466,6 +292,8 @@ sudo systemctl enable --now weibo-assistant-server.service
 sudo systemctl enable --now weibo-assistant-monitor.service
 sudo systemctl enable --now weibo-assistant-frontend.service
 ```
+
+monitor 首次启动或发现登录失效时会通过企业微信发送文字提示和二维码截图；扫码成功后自动开始或恢复监听。
 
 代码更新后：
 
@@ -500,7 +328,7 @@ curl 'http://localhost:6001/api/notification-events?limit=50'
 ```
 
 - `/livez`：只表示 API 进程存活，不访问依赖。
-- `/readyz`：检查数据库，并返回 monitor freshness、最后消息时间和通知积压。
+- `/readyz`：检查数据库和 monitor freshness；任一不可用时返回 HTTP `503`，响应同时包含最后消息时间和通知积压。
 - `/healthz`：兼容入口，行为与 `/readyz` 相同。
 - `/metrics`：Prometheus 文本指标。
 - `/api/groups/{id}/message-stats`：用客户端传入的本地自然日边界统计今日和昨日成员消息。
@@ -555,7 +383,7 @@ curl -X POST http://localhost:6001/api/notification-rules \
 - server/monitor 内存及 goroutine 数。
 - monitor 心跳年龄和最后消息时间。
 
-生产 `info` 日志不输出群聊正文、群名和昵称，只记录稳定 ID、消息类型、正文长度和短 SHA-256。`LOG_LEVEL=debug` 会输出截断正文，只应在短期排查时启用。
+生产 `info` 日志不输出群聊正文、群名和昵称，只记录稳定 ID、消息类型、正文长度和短 SHA-256。网络资源只保留主机、路径及少量排障所需参数，`data:` 内容与未知查询参数会被脱敏；服务端异常通过请求 ID 关联内部日志，不直接把错误细节返回前端。`LOG_LEVEL=debug` 会输出截断正文，只应在短期排查时启用。
 
 systemd 部署时，server 和 monitor 分别写入 `logs/server.log`、`logs/monitor.log`；安装脚本同时配置每日轮转、保留 14 份和旧日志压缩。frontend service 仍写入 journald。具体命令见 [systemd 长期运行与日志](./docs/4.systemd长期运行与日志.md)。
 

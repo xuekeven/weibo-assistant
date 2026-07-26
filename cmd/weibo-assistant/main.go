@@ -44,11 +44,6 @@ func run() error {
 			return err
 		}
 		return app.RunServer(ctx, cfg)
-	case "login":
-		if err := cfg.ValidateBrowser(); err != nil {
-			return err
-		}
-		return app.RunLogin(ctx, cfg)
 	case "monitor":
 		if err := cfg.ValidateMonitor(); err != nil {
 			return err
@@ -90,9 +85,8 @@ func configureLogging(value string) {
 
 func printUsage() {
 	fmt.Println(`Usage:
-	  weibo-assistant server   Start API and realtime WebSocket server
-  weibo-assistant login    Open Chromium with persistent profile for login
-	  weibo-assistant monitor  Run monitor worker only
-	  weibo-assistant frontend Serve the built Vue frontend
-  weibo-assistant migrate  Apply database migrations`)
+  weibo-assistant server    Start API and realtime WebSocket server
+  weibo-assistant monitor   Run monitor worker and handle QR-code login
+  weibo-assistant frontend  Serve the built Vue frontend
+  weibo-assistant migrate   Apply database migrations`)
 }

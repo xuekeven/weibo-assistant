@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -80,19 +82,34 @@ func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content stri
 }
 
 func (c *WeworkClient) SendImage(ctx context.Context, imagePath string) (SendResponse, error) {
-	file, err := os.Open(imagePath)
+	image, err := os.ReadFile(imagePath)
 	if err != nil {
 		return SendResponse{}, err
 	}
-	defer file.Close()
+	return c.SendImageBytes(ctx, filepath.Base(imagePath), image)
+}
 
+func (c *WeworkClient) SendImageBytes(ctx context.Context, filename string, image []byte) (SendResponse, error) {
+	filename = filepath.Base(strings.TrimSpace(filename))
+	if filename == "" || filename == "." {
+		filename = "weibo-login.png"
+	}
+	if len(image) == 0 {
+		return SendResponse{}, fmt.Errorf("wework image is empty")
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("media", filepath.Base(imagePath))
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     "media",
+		"filename": filename,
+	}))
+	partHeader.Set("Content-Type", imageContentType(filename, image))
+	part, err := writer.CreatePart(partHeader)
 	if err != nil {
 		return SendResponse{}, err
 	}
-	if _, err := io.Copy(part, file); err != nil {
+	if _, err := part.Write(image); err != nil {
 		return SendResponse{}, err
 	}
 	if c.toUser != "" {
@@ -111,6 +128,25 @@ func (c *WeworkClient) SendImage(ctx context.Context, imagePath string) (SendRes
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return c.doSend(req)
+}
+
+func imageContentType(filename string, image []byte) string {
+	if len(image) >= 8 &&
+		image[0] == 0x89 && image[1] == 0x50 && image[2] == 0x4e && image[3] == 0x47 &&
+		image[4] == 0x0d && image[5] == 0x0a && image[6] == 0x1a && image[7] == 0x0a {
+		return "image/png"
+	}
+	if len(image) >= 3 && image[0] == 0xff && image[1] == 0xd8 && image[2] == 0xff {
+		return "image/jpeg"
+	}
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (c *WeworkClient) doSend(req *http.Request) (SendResponse, error) {

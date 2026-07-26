@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,11 +15,14 @@ import (
 
 type Config struct {
 	// 基础服务配置。
-	AppEnv          string
-	DatabaseURL     string
-	BackendPort     int
-	FrontendPort    int
-	FrontendDistDir string
+	AppEnv             string
+	DatabaseURL        string
+	BackendBindAddr    string
+	BackendPort        int
+	FrontendBindAddr   string
+	FrontendPort       int
+	FrontendDistDir    string
+	CORSAllowedOrigins []string
 
 	// Chromium 与微博页面配置。
 	WeiboChatURL     string
@@ -41,11 +46,12 @@ type Config struct {
 	NotificationMaxAttempts  int
 
 	// 长期运行、健康检查及内存上限相关配置。
-	HealthCheckInterval time.Duration
-	MonitorStaleAfter   time.Duration
-	PageReloadInterval  time.Duration
-	ImageCacheTTL       time.Duration
-	ImageCacheMaxItems  int
+	HealthCheckInterval    time.Duration
+	MonitorStaleAfter      time.Duration
+	PageReloadInterval     time.Duration
+	ImageCacheTTL          time.Duration
+	ImageCacheMaxItems     int
+	LoginQRRefreshInterval time.Duration
 
 	LogLevel string
 }
@@ -54,18 +60,37 @@ func Load(envPath string) (Config, error) {
 	// godotenv 不会覆盖进程中已经存在的环境变量，部署平台传入的值仍然优先。
 	_ = godotenv.Load(envPath)
 
+	var loadErrs []error
+	readInt := func(key string, fallback int) int {
+		value, err := getInt(key, fallback)
+		if err != nil {
+			loadErrs = append(loadErrs, err)
+		}
+		return value
+	}
+	readBool := func(key string, fallback bool) bool {
+		value, err := getBool(key, fallback)
+		if err != nil {
+			loadErrs = append(loadErrs, err)
+		}
+		return value
+	}
+
 	cfg := Config{
 		AppEnv:                   getString("APP_ENV", "development"),
 		DatabaseURL:              getString("DATABASE_URL", ""),
-		BackendPort:              getInt("BACKEND_PORT", 6001),
-		FrontendPort:             getInt("FRONTEND_PORT", 6002),
+		BackendBindAddr:          getString("BACKEND_BIND_ADDRESS", "0.0.0.0"),
+		BackendPort:              readInt("BACKEND_PORT", 6001),
+		FrontendBindAddr:         getString("FRONTEND_BIND_ADDRESS", "0.0.0.0"),
+		FrontendPort:             readInt("FRONTEND_PORT", 6002),
 		FrontendDistDir:          getString("FRONTEND_DIST_DIR", "frontend/dist"),
+		CORSAllowedOrigins:       getStringList("CORS_ALLOWED_ORIGINS"),
 		WeiboChatURL:             getString("WEIBO_CHAT_URL", "https://api.weibo.com/chat#/chat"),
 		WeiboProfileDir:          getString("WEIBO_PROFILE_DIR", ".weibo-profile"),
-		Headless:                 getBool("HEADLESS", true),
+		Headless:                 readBool("HEADLESS", true),
 		ChromeExecutable:         getString("CHROME_EXECUTABLE", ""),
-		ChromeNoSandbox:          getBool("CHROME_NO_SANDBOX", false),
-		ChromeDebugPort:          getInt("CHROME_DEBUG_PORT", 9222),
+		ChromeNoSandbox:          readBool("CHROME_NO_SANDBOX", false),
+		ChromeDebugPort:          readInt("CHROME_DEBUG_PORT", 9222),
 		TargetGroupName:          getString("TARGET_GROUP_NAME", ""),
 		TargetGroupID:            getString("TARGET_GROUP_ID", ""),
 		TargetSenderName:         getString("TARGET_SENDER_NAME", ""),
@@ -73,17 +98,18 @@ func Load(envPath string) (Config, error) {
 		WeworkRelayURL:           strings.TrimRight(getString("WEWORK_RELAY_URL", "http://aliserver.tailed5977.ts.net:5001"), "/"),
 		WeworkRelayAPIKey:        getString("WEWORK_RELAY_API_KEY", ""),
 		WeworkRelayToUser:        getString("WEWORK_RELAY_TOUSER", ""),
-		NotificationPollInterval: time.Duration(getInt("NOTIFICATION_POLL_INTERVAL_MS", 1000)) * time.Millisecond,
-		NotificationMaxAttempts:  getInt("NOTIFICATION_MAX_ATTEMPTS", 8),
-		HealthCheckInterval:      time.Duration(getInt("HEALTH_CHECK_INTERVAL_SECONDS", 60)) * time.Second,
-		MonitorStaleAfter:        time.Duration(getInt("MONITOR_STALE_AFTER_SECONDS", 180)) * time.Second,
-		PageReloadInterval:       time.Duration(getInt("PAGE_RELOAD_INTERVAL_MINUTES", 0)) * time.Minute,
-		ImageCacheTTL:            time.Duration(getInt("IMAGE_CACHE_TTL_SECONDS", 86400)) * time.Second,
-		ImageCacheMaxItems:       getInt("IMAGE_CACHE_MAX_ITEMS", 1000),
+		NotificationPollInterval: time.Duration(readInt("NOTIFICATION_POLL_INTERVAL_MS", 1000)) * time.Millisecond,
+		NotificationMaxAttempts:  readInt("NOTIFICATION_MAX_ATTEMPTS", 8),
+		HealthCheckInterval:      time.Duration(readInt("HEALTH_CHECK_INTERVAL_SECONDS", 60)) * time.Second,
+		MonitorStaleAfter:        time.Duration(readInt("MONITOR_STALE_AFTER_SECONDS", 180)) * time.Second,
+		PageReloadInterval:       time.Duration(readInt("PAGE_RELOAD_INTERVAL_MINUTES", 0)) * time.Minute,
+		ImageCacheTTL:            time.Duration(readInt("IMAGE_CACHE_TTL_SECONDS", 86400)) * time.Second,
+		ImageCacheMaxItems:       readInt("IMAGE_CACHE_MAX_ITEMS", 1000),
+		LoginQRRefreshInterval:   time.Duration(readInt("LOGIN_QR_REFRESH_SECONDS", 120)) * time.Second,
 		LogLevel:                 getString("LOG_LEVEL", "info"),
 	}
 
-	return cfg, nil
+	return cfg, errors.Join(loadErrs...)
 }
 
 func (c Config) ValidateDatabase() error {
@@ -122,6 +148,9 @@ func (c Config) ValidateWework() error {
 func (c Config) ValidateServer() error {
 	var errs []error
 	errs = append(errs, c.ValidateDatabase())
+	if net.ParseIP(c.BackendBindAddr) == nil {
+		errs = append(errs, errors.New("BACKEND_BIND_ADDRESS must be an IP address"))
+	}
 	if c.BackendPort <= 0 || c.BackendPort > 65535 {
 		errs = append(errs, fmt.Errorf("BACKEND_PORT must be between 1 and 65535"))
 	}
@@ -131,6 +160,7 @@ func (c Config) ValidateServer() error {
 	if c.MonitorStaleAfter <= 0 {
 		errs = append(errs, errors.New("MONITOR_STALE_AFTER_SECONDS must be greater than 0"))
 	}
+	errs = append(errs, validateOrigins(c.CORSAllowedOrigins)...)
 	return errors.Join(errs...)
 }
 
@@ -152,11 +182,17 @@ func (c Config) ValidateMonitor() error {
 	if c.ImageCacheTTL <= 0 || c.ImageCacheMaxItems <= 0 {
 		errs = append(errs, errors.New("image cache TTL and max items must be greater than 0"))
 	}
+	if c.LoginQRRefreshInterval <= 0 {
+		errs = append(errs, errors.New("LOGIN_QR_REFRESH_SECONDS must be greater than 0"))
+	}
 	return errors.Join(errs...)
 }
 
 func (c Config) ValidateFrontend() error {
 	var errs []error
+	if net.ParseIP(c.FrontendBindAddr) == nil {
+		errs = append(errs, errors.New("FRONTEND_BIND_ADDRESS must be an IP address"))
+	}
 	if c.FrontendPort <= 0 || c.FrontendPort > 65535 {
 		errs = append(errs, fmt.Errorf("FRONTEND_PORT must be between 1 and 65535"))
 	}
@@ -173,22 +209,56 @@ func getString(key, fallback string) string {
 	return fallback
 }
 
-func getInt(key string, fallback int) int {
+func getStringList(key string) []string {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
-		return fallback
+		return nil
+	}
+	values := strings.Split(raw, ",")
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func getInt(key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil {
-		return fallback
+		return fallback, fmt.Errorf("%s must be an integer, got %q", key, raw)
 	}
-	return value
+	return value, nil
 }
 
-func getBool(key string, fallback bool) bool {
+func getBool(key string, fallback bool) (bool, error) {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
-	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return fallback, fmt.Errorf("%s must be a boolean, got %q", key, raw)
+	}
+}
+
+func validateOrigins(origins []string) []error {
+	var errs []error
+	for _, origin := range origins {
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+			parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			errs = append(errs, fmt.Errorf("invalid CORS_ALLOWED_ORIGINS entry %q; expected scheme://host:port", origin))
+		}
+	}
+	return errs
 }

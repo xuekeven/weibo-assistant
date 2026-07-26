@@ -1,14 +1,20 @@
 package browser
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -23,25 +29,34 @@ import (
 type MonitorOptions struct {
 	// MonitorOptions 既包含启动参数，也包含采集事件回调。
 	// browser 通过回调报告结果，避免反向依赖 store 或 notifier。
-	URL                 string
-	ProfileDir          string
-	Executable          string
-	Headless            bool
-	NoSandbox           bool
-	DebugPort           int
-	HealthCheckInterval time.Duration
-	PageReloadInterval  time.Duration
-	TargetGroupID       string
-	TargetGroupName     string
-	OnProbe             func(context.Context, PageProbe) error
-	OnMessage           func(context.Context, NetworkMessage) error
-	OnImageReference    func(context.Context, NetworkImageReference) error
-	OnBrowserState      func(bool)
-	OnCDPState          func(connected bool, reconnected bool)
-	OnPageTarget        func(webSocketDebuggerURL string)
-	OnWebSocketState    func(connected bool, reconnected bool)
-	OnMessagesParsed    func(int)
-	OnTrackedRequests   func(int)
+	URL                    string
+	ProfileDir             string
+	Executable             string
+	Headless               bool
+	NoSandbox              bool
+	DebugPort              int
+	HealthCheckInterval    time.Duration
+	PageReloadInterval     time.Duration
+	LoginQRRefreshInterval time.Duration
+	TargetGroupID          string
+	TargetGroupName        string
+	OnProbe                func(context.Context, PageProbe) error
+	OnMessage              func(context.Context, NetworkMessage) error
+	OnImageReference       func(context.Context, NetworkImageReference) error
+	OnBrowserState         func(bool)
+	OnCDPState             func(connected bool, reconnected bool)
+	OnPageTarget           func(webSocketDebuggerURL string)
+	OnWebSocketState       func(connected bool, reconnected bool)
+	OnMessagesParsed       func(int)
+	OnTrackedRequests      func(int)
+	OnLoginRequired        func(context.Context, LoginRequiredEvent) error
+	OnLoginRestored        func()
+}
+
+type LoginRequiredEvent struct {
+	URL           string
+	Title         string
+	ScreenshotPNG []byte
 }
 
 type PageProbe struct {
@@ -144,7 +159,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	slog.Info("starting browser monitor", "executable", executable, "profileDir", profileDir, "url", opts.URL, "headless", opts.Headless, "debugPort", opts.DebugPort)
+	slog.Info("starting browser monitor", "executable", executable, "profileDir", profileDir, "url", networkURLLogValue(opts.URL), "headless", opts.Headless, "debugPort", opts.DebugPort)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start browser monitor: %w", err)
 	}
@@ -171,7 +186,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		})
 	}
 
-	target, probe, err := waitForChatPageTarget(ctx, opts.DebugPort)
+	target, probe, err := waitForAuthenticatedChatPage(ctx, opts)
 	if err != nil {
 		stopProcess(cmd)
 		return err
@@ -191,7 +206,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			opts.OnPageTarget(target.WebSocketDebuggerURL)
 		}
 	}
-	slog.Info("monitor heartbeat", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error)
+	slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
 	if opts.OnProbe != nil {
 		if err := opts.OnProbe(ctx, probe); err != nil {
 			slog.Warn("update monitor status failed", "error", err)
@@ -296,6 +311,17 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			return errors.New("browser monitor exited")
 		case <-ticker.C:
 			currentTarget, probe := getCurrentPageProbe(ctx, opts.DebugPort)
+			if probe.Status == "login_required" {
+				var err error
+				currentTarget, probe, err = waitForAuthenticatedChatPage(ctx, opts)
+				if err != nil {
+					stopProcess(cmd)
+					if ctx.Err() != nil {
+						return nil
+					}
+					return err
+				}
+			}
 			if probe.Status == "page_ok" && currentTarget.WebSocketDebuggerURL != "" {
 				selectCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 				selectStatus, selectErr := selectTargetGroup(selectCtx, currentTarget.WebSocketDebuggerURL, TargetGroup{
@@ -309,8 +335,8 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				}
 				if currentTarget.WebSocketDebuggerURL != target.WebSocketDebuggerURL {
 					slog.Warn("chat page target changed; rebinding network monitor",
-						"oldURL", target.URL,
-						"newURL", currentTarget.URL,
+						"oldURL", networkURLLogValue(target.URL),
+						"newURL", networkURLLogValue(currentTarget.URL),
 					)
 					target = currentTarget
 					startNetworkMonitor(target.WebSocketDebuggerURL)
@@ -322,15 +348,11 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 					}
 				}
 			}
-			slog.Info("monitor heartbeat", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error)
+			slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
 			if opts.OnProbe != nil {
 				if err := opts.OnProbe(ctx, probe); err != nil {
 					slog.Warn("update monitor status failed", "error", err)
 				}
-			}
-			if probe.Status == "login_required" {
-				stopProcess(cmd)
-				return errors.New("weibo login is required")
 			}
 		case result := <-networkErrCh:
 			if result.generation != networkGeneration {
@@ -356,8 +378,15 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			reconnectC = nil
 			currentTarget, reconnectProbe := getCurrentPageProbe(ctx, opts.DebugPort)
 			if reconnectProbe.Status == "login_required" {
-				stopProcess(cmd)
-				return errors.New("weibo login is required")
+				var err error
+				currentTarget, reconnectProbe, err = waitForAuthenticatedChatPage(ctx, opts)
+				if err != nil {
+					stopProcess(cmd)
+					if ctx.Err() != nil {
+						return nil
+					}
+					return err
+				}
 			}
 			if reconnectProbe.Status != "page_ok" || currentTarget.WebSocketDebuggerURL == "" {
 				scheduleNetworkReconnect(fmt.Errorf("chat page is not ready: status=%s error=%s", reconnectProbe.Status, reconnectProbe.Error))
@@ -366,14 +395,14 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			target = currentTarget
 			slog.Info("reconnecting network monitor in current browser process",
 				"attempt", reconnectAttempt,
-				"url", target.URL,
+				"url", networkURLLogValue(target.URL),
 			)
 			startNetworkMonitor(target.WebSocketDebuggerURL)
 			if opts.OnPageTarget != nil {
 				opts.OnPageTarget(target.WebSocketDebuggerURL)
 			}
 		case <-reloadC:
-			slog.Info("page reload interval reached; reloading current chat page", "url", target.URL)
+			slog.Info("page reload interval reached; reloading current chat page", "url", networkURLLogValue(target.URL))
 			if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
 				slog.Warn("page reload failed", "error", err)
 			}
@@ -443,16 +472,100 @@ func waitForDebugEndpoint(ctx context.Context, port int, timeout time.Duration) 
 	}
 }
 
-func waitForChatPageTarget(ctx context.Context, port int) (chromeTarget, PageProbe, error) {
+const (
+	loginRequiredError        = "微博登录已失效，请扫描企业微信收到的二维码"
+	loginScreenshotDelay      = 3 * time.Second
+	loginNotificationRetryGap = time.Minute
+	defaultLoginQRRefreshGap  = 2 * time.Minute
+	chatPageReadinessDelay    = 2 * time.Second
+)
+
+func waitForAuthenticatedChatPage(ctx context.Context, opts MonitorOptions) (chromeTarget, PageProbe, error) {
+	loginRequired := false
+	alertError := ""
+	nextAlertAt := time.Time{}
+	lastProbeReportedAt := time.Time{}
+	pageOKSince := time.Time{}
+
 	for {
-		target, probe := getCurrentPageProbe(ctx, port)
+		target, probe := getCurrentPageProbe(ctx, opts.DebugPort)
 		if probe.Status == "page_ok" && target.WebSocketDebuggerURL != "" {
-			return target, probe, nil
+			if pageOKSince.IsZero() {
+				pageOKSince = time.Now()
+			}
+			if time.Since(pageOKSince) >= chatPageReadinessDelay {
+				if loginRequired {
+					slog.Info("weibo login restored; resuming monitor", "url", networkURLLogValue(probe.URL))
+					reportPageProbe(ctx, opts, probe)
+					if opts.OnLoginRestored != nil {
+						opts.OnLoginRestored()
+					}
+				}
+				return target, probe, nil
+			}
+		} else {
+			pageOKSince = time.Time{}
 		}
 		if probe.Status == "login_required" {
-			return target, probe, errors.New("weibo login is required")
+			probe.Error = loginRequiredError
+			if alertError != "" {
+				probe.Error += "；发送登录提醒失败：" + alertError
+			}
+			now := time.Now()
+			if !loginRequired {
+				loginRequired = true
+				nextAlertAt = now.Add(loginScreenshotDelay)
+				reportPageProbe(ctx, opts, probe)
+				lastProbeReportedAt = now
+				slog.Warn("weibo login is required; waiting for QR code login", "url", networkURLLogValue(probe.URL))
+			} else if now.Sub(lastProbeReportedAt) >= opts.HealthCheckInterval {
+				reportPageProbe(ctx, opts, probe)
+				lastProbeReportedAt = now
+			}
+
+			if opts.OnLoginRequired != nil && !now.Before(nextAlertAt) && target.WebSocketDebuggerURL != "" {
+				screenshot, screenshotErr := capturePageScreenshot(ctx, target.WebSocketDebuggerURL)
+				if screenshotErr != nil {
+					slog.Warn("capture weibo login screenshot failed", "error", screenshotErr)
+					alertError = screenshotErr.Error()
+					probe.Error = loginRequiredError + "；发送登录提醒失败：" + alertError
+					reportPageProbe(ctx, opts, probe)
+					lastProbeReportedAt = now
+					nextAlertAt = now.Add(loginNotificationRetryGap)
+				} else {
+					notifyErr := opts.OnLoginRequired(ctx, LoginRequiredEvent{
+						URL:           probe.URL,
+						Title:         probe.Title,
+						ScreenshotPNG: screenshot,
+					})
+					if notifyErr != nil {
+						slog.Warn("send weibo login notification failed", "error", notifyErr)
+						alertError = notifyErr.Error()
+						probe.Error = loginRequiredError + "；发送登录提醒失败：" + alertError
+						reportPageProbe(ctx, opts, probe)
+						lastProbeReportedAt = now
+						nextAlertAt = now.Add(loginNotificationRetryGap)
+					} else {
+						alertError = ""
+						probe.Error = loginRequiredError
+						reportPageProbe(ctx, opts, probe)
+						lastProbeReportedAt = now
+						refreshGap := opts.LoginQRRefreshInterval
+						if refreshGap <= 0 {
+							refreshGap = defaultLoginQRRefreshGap
+						}
+						nextAlertAt = now.Add(refreshGap)
+						slog.Info("weibo login notification checked",
+							"screenshotBytes", len(screenshot),
+							"nextCheckIn", refreshGap,
+						)
+					}
+				}
+			}
+		} else if lastProbeReportedAt.IsZero() || time.Since(lastProbeReportedAt) >= opts.HealthCheckInterval {
+			reportPageProbe(ctx, opts, probe)
+			lastProbeReportedAt = time.Now()
 		}
-		slog.Info("chat page not ready; retrying", "status", probe.Status, "url", probe.URL, "title", probe.Title, "error", probe.Error, "retryIn", "1s")
 		select {
 		case <-ctx.Done():
 			return chromeTarget{}, probe, ctx.Err()
@@ -460,6 +573,288 @@ func waitForChatPageTarget(ctx context.Context, port int) (chromeTarget, PagePro
 		}
 	}
 }
+
+func reportPageProbe(ctx context.Context, opts MonitorOptions, probe PageProbe) {
+	slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
+	if opts.OnProbe == nil {
+		return
+	}
+	if err := opts.OnProbe(ctx, probe); err != nil {
+		slog.Warn("update monitor status failed", "error", err)
+	}
+}
+
+func capturePageScreenshot(ctx context.Context, webSocketDebuggerURL string) ([]byte, error) {
+	captureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	client, err := newCDPClient(captureCtx, webSocketDebuggerURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	var qr loginQRCodeTarget
+	if err := client.evaluate(captureCtx, findLoginQRCodeExpression, &qr); err != nil {
+		return nil, fmt.Errorf("locate login QR code: %w", err)
+	}
+	if qr.valid() && qr.Source != "" {
+		qrImage, resourceErr := readPageImageResource(captureCtx, client, qr.Source)
+		if resourceErr == nil {
+			slog.Info("captured weibo login screenshot",
+				"mode", "qr_resource",
+				"qrWidth", qr.Width,
+				"qrHeight", qr.Height,
+				"bytes", len(qrImage),
+			)
+			return qrImage, nil
+		}
+		slog.Warn("read weibo login QR resource failed; falling back to element screenshot", "error", resourceErr)
+	}
+
+	var overlayDismissed bool
+	if err := client.evaluate(captureCtx, dismissLoginOverlayExpression, &overlayDismissed); err != nil {
+		return nil, fmt.Errorf("prepare login screenshot: %w", err)
+	}
+	if overlayDismissed {
+		select {
+		case <-captureCtx.Done():
+			return nil, captureCtx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	if err := client.evaluate(captureCtx, findLoginQRCodeExpression, &qr); err != nil {
+		return nil, fmt.Errorf("locate login QR code: %w", err)
+	}
+
+	screenshotParams := map[string]any{
+		"format":      "png",
+		"fromSurface": true,
+	}
+	captureMode := "page"
+	if qr.valid() {
+		screenshotParams["captureBeyondViewport"] = true
+		screenshotParams["clip"] = map[string]any{
+			"x":      qr.X,
+			"y":      qr.Y,
+			"width":  qr.Width,
+			"height": qr.Height,
+			"scale":  qr.screenshotScale(),
+		}
+		captureMode = "qr_element"
+	} else {
+		screenshotParams["captureBeyondViewport"] = false
+	}
+
+	var result struct {
+		Data string `json:"data"`
+	}
+	if err := client.call(captureCtx, "Page.captureScreenshot", screenshotParams, &result); err != nil {
+		return nil, err
+	}
+	screenshot, err := base64.StdEncoding.DecodeString(result.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode login screenshot: %w", err)
+	}
+	if len(screenshot) == 0 {
+		return nil, errors.New("login screenshot is empty")
+	}
+	slog.Info("captured weibo login screenshot",
+		"mode", captureMode,
+		"qrWidth", qr.Width,
+		"qrHeight", qr.Height,
+		"bytes", len(screenshot),
+	)
+	return screenshot, nil
+}
+
+func readPageImageResource(ctx context.Context, client *cdpClient, source string) ([]byte, error) {
+	if strings.HasPrefix(source, "data:") {
+		data, err := decodeDataURL(source)
+		if err != nil {
+			return nil, err
+		}
+		return normalizePNG(data)
+	}
+
+	if err := client.call(ctx, "Page.enable", nil, nil); err != nil {
+		return nil, fmt.Errorf("enable page agent: %w", err)
+	}
+
+	var frameResult struct {
+		FrameTree struct {
+			Frame struct {
+				ID string `json:"id"`
+			} `json:"frame"`
+		} `json:"frameTree"`
+	}
+	if err := client.call(ctx, "Page.getFrameTree", nil, &frameResult); err != nil {
+		return nil, fmt.Errorf("get page frame: %w", err)
+	}
+	frameID := frameResult.FrameTree.Frame.ID
+	if frameID == "" {
+		return nil, errors.New("get page frame: frame id is empty")
+	}
+
+	var resource struct {
+		Content       string `json:"content"`
+		Base64Encoded bool   `json:"base64Encoded"`
+	}
+	if err := client.call(ctx, "Page.getResourceContent", map[string]any{
+		"frameId": frameID,
+		"url":     source,
+	}, &resource); err != nil {
+		return nil, fmt.Errorf("get QR resource content: %w", err)
+	}
+	var data []byte
+	var err error
+	if resource.Base64Encoded {
+		data, err = base64.StdEncoding.DecodeString(resource.Content)
+		if err != nil {
+			return nil, fmt.Errorf("decode QR resource: %w", err)
+		}
+	} else {
+		data = []byte(resource.Content)
+	}
+	return normalizePNG(data)
+}
+
+func decodeDataURL(source string) ([]byte, error) {
+	header, payload, ok := strings.Cut(source, ",")
+	if !ok {
+		return nil, errors.New("decode QR data URL: missing payload")
+	}
+	if strings.HasSuffix(strings.ToLower(header), ";base64") {
+		data, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode QR data URL: %w", err)
+		}
+		return data, nil
+	}
+	data, err := neturl.PathUnescape(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode QR data URL: %w", err)
+	}
+	return []byte(data), nil
+}
+
+func normalizePNG(data []byte) ([]byte, error) {
+	const maxQRCodeBytes = 5 << 20
+	if len(data) == 0 {
+		return nil, errors.New("QR image is empty")
+	}
+	if len(data) > maxQRCodeBytes {
+		return nil, fmt.Errorf("QR image is too large: %d bytes", len(data))
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode QR image config: %w", err)
+	}
+	if config.Width < 80 || config.Height < 80 || config.Width > 2048 || config.Height > 2048 {
+		return nil, fmt.Errorf("unexpected QR image dimensions: %dx%d", config.Width, config.Height)
+	}
+	if bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return data, nil
+	}
+
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode QR image: %w", err)
+	}
+	var output bytes.Buffer
+	if err := png.Encode(&output, decoded); err != nil {
+		return nil, fmt.Errorf("encode QR image as PNG: %w", err)
+	}
+	return output.Bytes(), nil
+}
+
+type loginQRCodeTarget struct {
+	Found  bool    `json:"found"`
+	Source string  `json:"source"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+func (target loginQRCodeTarget) valid() bool {
+	return target.Found &&
+		!math.IsNaN(target.X) &&
+		!math.IsNaN(target.Y) &&
+		!math.IsNaN(target.Width) &&
+		!math.IsNaN(target.Height) &&
+		target.X >= 0 &&
+		target.Y >= 0 &&
+		target.Width >= 80 &&
+		target.Height >= 80 &&
+		target.Width <= 2048 &&
+		target.Height <= 2048
+}
+
+func (target loginQRCodeTarget) screenshotScale() float64 {
+	const (
+		preferredScale = 2
+		maxOutputSize  = 1024
+	)
+	scale := math.Min(preferredScale, maxOutputSize/math.Max(target.Width, target.Height))
+	if scale < 1 {
+		return 1
+	}
+	return scale
+}
+
+const dismissLoginOverlayExpression = `(() => {
+  const visible = (element) => {
+    if (!(element instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      rect.width > 0 &&
+      rect.height > 0;
+  };
+  const candidates = [...document.querySelectorAll('button, [role="button"], a, div, span')];
+  const confirm = candidates.find((element) =>
+    visible(element) && String(element.textContent || '').trim() === '我知道了'
+  );
+  if (!(confirm instanceof HTMLElement)) return false;
+  confirm.click();
+  return true;
+})()`
+
+const findLoginQRCodeExpression = `(() => {
+  const visible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      Number(style.opacity || 1) > 0 &&
+      rect.width >= 80 &&
+      rect.height >= 80;
+  };
+  const selectors = [
+    'img.qrcode_img',
+    '.qrcode img',
+    'img[src*="qr.weibo.cn"]',
+    '[class*="qrcode" i] img',
+    '[class*="qrcode" i] canvas'
+  ];
+  const qr = selectors
+    .flatMap((selector) => [...document.querySelectorAll(selector)])
+    .find(visible);
+  if (!qr) return { found: false, source: '', x: 0, y: 0, width: 0, height: 0 };
+  const rect = qr.getBoundingClientRect();
+  return {
+    found: true,
+    source: qr instanceof HTMLImageElement ? String(qr.currentSrc || qr.src || '') : '',
+    x: Math.max(0, rect.left + window.scrollX),
+    y: Math.max(0, rect.top + window.scrollY),
+    width: rect.width,
+    height: rect.height
+  };
+})()`
 
 func getCurrentPageProbe(ctx context.Context, port int) (chromeTarget, PageProbe) {
 	probe := PageProbe{
@@ -509,6 +904,17 @@ func getCurrentPageProbe(ctx context.Context, port int) (chromeTarget, PageProbe
 	probe.URL = target.URL
 	probe.Title = target.Title
 	probe.Status = classifyPage(target.URL, target.Title)
+	if probe.Status == "page_ok" && target.WebSocketDebuggerURL != "" {
+		loginRequired, err := detectLoginRequiredInPage(ctx, target.WebSocketDebuggerURL)
+		if err != nil {
+			probe.Status = "page_probe_failed"
+			probe.Error = "detect embedded login page: " + err.Error()
+			return target, probe
+		}
+		if loginRequired {
+			probe.Status = "login_required"
+		}
+	}
 	return target, probe
 }
 
@@ -664,6 +1070,44 @@ func classifyPage(url string, title string) string {
 	return "page_open"
 }
 
+func detectLoginRequiredInPage(ctx context.Context, webSocketDebuggerURL string) (bool, error) {
+	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	client, err := newCDPClient(detectCtx, webSocketDebuggerURL)
+	if err != nil {
+		return false, err
+	}
+	defer client.Close()
+
+	var required bool
+	if err := client.evaluate(detectCtx, embeddedLoginDetectionExpression, &required); err != nil {
+		return false, err
+	}
+	return required, nil
+}
+
+const embeddedLoginDetectionExpression = `(() => {
+  const visible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      Number(style.opacity || 1) > 0 &&
+      rect.width > 10 &&
+      rect.height > 10;
+  };
+  const qr = document.querySelector(
+    'img.qrcode_img, .qrcode img, img[src*="qr.weibo.cn"], [class*="qrcode" i] img'
+  );
+  if (visible(qr)) return true;
+  const login = document.querySelector('.login, [class*="login" i]');
+  const text = String(login?.innerText || document.body?.innerText || '');
+  return visible(login) &&
+    (text.includes('用微博手机版扫描登录聊天') || text.includes('扫描登录'));
+})()`
+
 func reloadPage(ctx context.Context, webSocketDebuggerURL string) error {
 	reloadCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -791,7 +1235,7 @@ func monitorNetworkEvents(
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
-				slog.Info("network websocket created", "requestID", params.RequestID, "url", params.URL)
+				slog.Info("network websocket created", "requestID", params.RequestID, "url", networkURLLogValue(params.URL))
 				if onWebSocketState != nil && len(activeWebSockets) == 1 {
 					onWebSocketState(true, wasDisconnected)
 				}
@@ -807,7 +1251,7 @@ func monitorNetworkEvents(
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
-				slog.Info("network websocket closed", "requestID", params.RequestID, "url", info.URL)
+				slog.Info("network websocket closed", "requestID", params.RequestID, "url", networkURLLogValue(info.URL))
 				if onWebSocketState != nil && hadWebSocket && len(activeWebSockets) == 0 {
 					onWebSocketState(false, false)
 				}
@@ -865,7 +1309,7 @@ func monitorNetworkEvents(
 			if len(messages) == 0 {
 				slog.Debug("network websocket frame received",
 					"requestID", params.RequestID,
-					"url", info.URL,
+					"url", networkURLLogValue(info.URL),
 					"opcode", params.Response.Opcode,
 					"payload", clipLogText(params.Response.PayloadData, 800),
 				)
@@ -901,7 +1345,7 @@ func monitorNetworkEvents(
 					"type", params.Type,
 					"status", params.Response.Status,
 					"mime", params.Response.MimeType,
-					"url", params.Response.URL,
+					"url", networkURLLogValue(params.Response.URL),
 				)
 			}
 		case "Network.loadingFinished":
@@ -922,12 +1366,12 @@ func monitorNetworkEvents(
 			}
 			for _, ref := range extractImageReferencesFromURL(info.RequestURL, info.URL) {
 				slog.Info("network image url reference parsed",
-					"sourceURL", clipLogText(ref.SourceURL, 180),
+					"sourceURL", networkURLLogValue(ref.SourceURL),
 					"fids", strings.Join(ref.FIDs, ","),
-					"urls", strings.Join(ref.URLs, ","),
+					"urls", networkURLsLogValue(ref.URLs),
 				)
 				if err := onImageReference(ctx, ref); err != nil {
-					slog.Warn("resolve image url reference failed", "sourceURL", ref.SourceURL, "error", err)
+					slog.Warn("resolve image url reference failed", "sourceURL", networkURLLogValue(ref.SourceURL), "error", err)
 				}
 			}
 			if !shouldInspectImageReferenceResponse(info, params.EncodedDataLength) {
@@ -935,18 +1379,18 @@ func monitorNetworkEvents(
 			}
 			body, err := getNetworkResponseBody(ctx, client, params.RequestID)
 			if err != nil {
-				slog.Debug("read network response body failed", "requestID", params.RequestID, "url", info.URL, "error", err)
+				slog.Debug("read network response body failed", "requestID", params.RequestID, "url", networkURLLogValue(info.URL), "error", err)
 				continue
 			}
 			refs := extractImageReferencesFromBody(body, info.URL)
 			for _, ref := range refs {
 				slog.Info("network image reference parsed",
-					"sourceURL", clipLogText(ref.SourceURL, 180),
+					"sourceURL", networkURLLogValue(ref.SourceURL),
 					"fids", strings.Join(ref.FIDs, ","),
-					"urls", strings.Join(ref.URLs, ","),
+					"urls", networkURLsLogValue(ref.URLs),
 				)
 				if err := onImageReference(ctx, ref); err != nil {
-					slog.Warn("resolve image reference failed", "sourceURL", ref.SourceURL, "error", err)
+					slog.Warn("resolve image reference failed", "sourceURL", networkURLLogValue(ref.SourceURL), "error", err)
 				}
 			}
 		case "Network.loadingFailed":
@@ -961,11 +1405,77 @@ func monitorNetworkEvents(
 					onTrackedRequests(len(requests))
 				}
 				if looksLikeMessageURL(info.URL) {
-					slog.Warn("network request failed", "requestID", params.RequestID, "url", info.URL, "error", params.ErrorText)
+					slog.Warn("network request failed", "requestID", params.RequestID, "url", networkURLLogValue(info.URL), "error", params.ErrorText)
 				}
 			}
 		}
 	}
+}
+
+func networkURLLogValue(rawURL string) string {
+	const maxLogURLLength = 320
+
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	lower := strings.ToLower(rawURL)
+	if strings.HasPrefix(lower, "data:") {
+		header, payload, _ := strings.Cut(rawURL, ",")
+		return fmt.Sprintf("%s,<payload:%d chars>", clipLogText(header, 80), len(payload))
+	}
+	if strings.HasPrefix(lower, "blob:") {
+		return "blob:<redacted>"
+	}
+
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return fmt.Sprintf("<invalid-or-relative-url:%d chars>", len(rawURL))
+	}
+	parsed.User = nil
+	parsed.Fragment = ""
+	originalQuery := parsed.Query()
+	safeQuery := neturl.Values{}
+	for _, key := range []string{
+		"fid", "gid", "id", "count", "max_mid", "source", "type",
+		"width", "high", "size", "imageType", "convert_emoji", "query_sender",
+	} {
+		for _, value := range originalQuery[key] {
+			safeQuery.Add(key, clipLogText(value, 80))
+		}
+	}
+	redactedKeys := 0
+	for key := range originalQuery {
+		if _, preserved := safeQuery[key]; !preserved {
+			redactedKeys++
+		}
+	}
+	parsed.RawQuery = safeQuery.Encode()
+	result := parsed.String()
+	if redactedKeys > 0 {
+		result += fmt.Sprintf(" [redacted-query-keys:%d]", redactedKeys)
+	}
+	return clipLogText(result, maxLogURLLength)
+}
+
+func networkURLsLogValue(urls []string) string {
+	const maxLoggedURLs = 5
+	if len(urls) == 0 {
+		return ""
+	}
+	limit := len(urls)
+	if limit > maxLoggedURLs {
+		limit = maxLoggedURLs
+	}
+	values := make([]string, 0, limit)
+	for _, rawURL := range urls[:limit] {
+		values = append(values, networkURLLogValue(rawURL))
+	}
+	result := strings.Join(values, ",")
+	if len(urls) > limit {
+		result += fmt.Sprintf(" [and %d more]", len(urls)-limit)
+	}
+	return clipLogText(result, 1000)
 }
 
 func rememberNetworkRequest(requests map[string]networkRequestInfo, requestID string, info networkRequestInfo, maxItems int) {

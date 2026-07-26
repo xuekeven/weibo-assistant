@@ -68,15 +68,6 @@ func RunServer(ctx context.Context, cfg config.Config) error {
 	}
 }
 
-func RunLogin(ctx context.Context, cfg config.Config) error {
-	return browser.RunLogin(ctx, browser.LoginOptions{
-		URL:        cfg.WeiboChatURL,
-		ProfileDir: cfg.WeiboProfileDir,
-		Executable: cfg.ChromeExecutable,
-		NoSandbox:  cfg.ChromeNoSandbox,
-	})
-}
-
 func RunMonitor(ctx context.Context, cfg config.Config) error {
 	// RunMonitor 是监控进程的“装配函数”。具体采集在 browser，持久化在 store，
 	// 这里负责启动后台任务并把 browser 的事件回调连接到业务处理。
@@ -113,6 +104,10 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		<-metricsDone
 	}()
 	imageURLByFID := newImageURLCache(cfg.ImageCacheTTL, cfg.ImageCacheMaxItems)
+	loginAlerts := newLoginAlertSender(
+		notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser),
+		strings.TrimSpace(cfg.WeworkRelayURL) != "" && strings.TrimSpace(cfg.WeworkRelayAPIKey) != "",
+	)
 	historyTarget := &historyPageTarget{}
 	disconnects := &disconnectWindow{}
 	var targetGroup store.Group
@@ -165,16 +160,17 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 
 	// browser 不直接访问数据库。它发现事件后调用下面的 OnXxx 回调。
 	return browser.RunMonitor(ctx, browser.MonitorOptions{
-		URL:                 cfg.WeiboChatURL,
-		ProfileDir:          cfg.WeiboProfileDir,
-		Executable:          cfg.ChromeExecutable,
-		Headless:            cfg.Headless,
-		NoSandbox:           cfg.ChromeNoSandbox,
-		DebugPort:           cfg.ChromeDebugPort,
-		HealthCheckInterval: cfg.HealthCheckInterval,
-		PageReloadInterval:  cfg.PageReloadInterval,
-		TargetGroupID:       cfg.TargetGroupID,
-		TargetGroupName:     cfg.TargetGroupName,
+		URL:                    cfg.WeiboChatURL,
+		ProfileDir:             cfg.WeiboProfileDir,
+		Executable:             cfg.ChromeExecutable,
+		Headless:               cfg.Headless,
+		NoSandbox:              cfg.ChromeNoSandbox,
+		DebugPort:              cfg.ChromeDebugPort,
+		HealthCheckInterval:    cfg.HealthCheckInterval,
+		PageReloadInterval:     cfg.PageReloadInterval,
+		LoginQRRefreshInterval: cfg.LoginQRRefreshInterval,
+		TargetGroupID:          cfg.TargetGroupID,
+		TargetGroupName:        cfg.TargetGroupName,
 		OnProbe: func(probeCtx context.Context, probe browser.PageProbe) error {
 			// 心跳既更新健康状态，也尝试用 DOM 中的新图片地址补全旧附件。
 			if err := st.UpdateMonitorStatus(probeCtx, probe.Status, probe.URL, probe.Error); err != nil {
@@ -262,7 +258,7 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 						return err
 					}
 					if count > 0 {
-						slog.Info("image attachment resolved", "fid", fid, "url", imageURL, "updated", count)
+						slog.Info("image attachment resolved", "fid", fid, "resource", mediaURLLogValue(imageURL), "updated", count)
 					}
 				}
 			}
@@ -299,6 +295,8 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		OnTrackedRequests: func(count int) {
 			metrics.trackedRequests.Store(int64(count))
 		},
+		OnLoginRequired: loginAlerts.Notify,
+		OnLoginRestored: loginAlerts.Reset,
 	})
 }
 
@@ -318,7 +316,7 @@ func resolveProbeImageCandidates(ctx context.Context, st *store.Store, imageURLB
 							return err
 						}
 						if count > 0 {
-							slog.Info("image attachment resolved from dom", "fid", fid, "url", url, "updated", count)
+							slog.Info("image attachment resolved from dom", "fid", fid, "resource", mediaURLLogValue(url), "updated", count)
 						}
 					}
 				}
@@ -336,7 +334,7 @@ func enrichNetworkAttachmentsWithImageCache(attachments []browser.NetworkAttachm
 		for _, fid := range networkAttachmentFIDs(attachments[index]) {
 			if imageURL, ok := imageURLByFID.Get(fid); ok {
 				attachments[index].URL = imageURL
-				return
+				break
 			}
 		}
 	}

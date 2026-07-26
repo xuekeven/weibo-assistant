@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -40,7 +44,7 @@ func NewServer(cfg config.Config, st *store.Store, notify *notifier.WeworkClient
 }
 
 func (s *Server) Addr() string {
-	return ":" + strconv.Itoa(s.cfg.BackendPort)
+	return net.JoinHostPort(s.cfg.BackendBindAddr, strconv.Itoa(s.cfg.BackendPort))
 }
 
 func (s *Server) Handler() http.Handler {
@@ -118,8 +122,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":                  "ready",
+	responseStatus, statusText := readinessHTTPStatus(fresh)
+	writeJSON(w, responseStatus, map[string]any{
+		"status":                  statusText,
 		"database":                "ok",
 		"monitorFresh":            fresh,
 		"monitorHeartbeatAgeSecs": ageSeconds,
@@ -172,6 +177,13 @@ func monitorFreshness(status store.MonitorStatus, now time.Time, staleAfter time
 		age = 0
 	}
 	return age <= staleAfter, int64(age.Seconds())
+}
+
+func readinessHTTPStatus(monitorFresh bool) (int, string) {
+	if !monitorFresh {
+		return http.StatusServiceUnavailable, "not_ready"
+	}
+	return http.StatusOK, "ready"
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -254,13 +266,15 @@ func (s *Server) handleNotifyProbe(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := newRequestID()
+		w.Header().Set("X-Request-ID", requestID)
 		origin := r.Header.Get("Origin")
 		if s.isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+			w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, X-Request-ID")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -281,7 +295,24 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return false
 	}
-	return parsed.Port() == strconv.Itoa(s.cfg.FrontendPort)
+	normalizedOrigin := strings.TrimRight(origin, "/")
+	if len(s.cfg.CORSAllowedOrigins) > 0 {
+		for _, allowed := range s.cfg.CORSAllowedOrigins {
+			if normalizedOrigin == allowed {
+				return true
+			}
+		}
+		return false
+	}
+	if parsed.Port() != strconv.Itoa(s.cfg.FrontendPort) {
+		return false
+	}
+	host := strings.Trim(strings.ToLower(parsed.Hostname()), "[]")
+	if host == "localhost" || strings.HasSuffix(host, ".ts.net") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || isTailscaleIP(ip))
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -294,8 +325,65 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	// 对外只返回简短错误字符串，详细上下文应由调用处写入服务端日志。
-	writeJSON(w, status, map[string]any{
-		"error": err.Error(),
+	requestID := w.Header().Get("X-Request-ID")
+	message := err.Error()
+	if status >= http.StatusInternalServerError {
+		slog.Error("http request failed", "requestID", requestID, "status", status, "error", errorLogValue(err))
+		switch status {
+		case http.StatusBadGateway:
+			message = "upstream service unavailable"
+		case http.StatusServiceUnavailable:
+			message = "service unavailable"
+		default:
+			message = "internal server error"
+		}
+	}
+	payload := map[string]any{"error": message}
+	if requestID != "" {
+		payload["requestId"] = requestID
+	}
+	writeJSON(w, status, payload)
+}
+
+var (
+	logURLPattern    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+	logSecretPattern = regexp.MustCompile(`(?i)\b(password|passwd|token|api[_-]?key|secret)=([^\s&]+)`)
+)
+
+func errorLogValue(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := logURLPattern.ReplaceAllStringFunc(err.Error(), func(rawURL string) string {
+		parsed, parseErr := url.Parse(rawURL)
+		if parseErr != nil || parsed.Host == "" {
+			return "<redacted-url>"
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
 	})
+	message = logSecretPattern.ReplaceAllString(message, "$1=<redacted>")
+	const maxLoggedErrorLength = 1000
+	if len(message) > maxLoggedErrorLength {
+		return message[:maxLoggedErrorLength] + "…"
+	}
+	return message
+}
+
+func newRequestID() string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return hex.EncodeToString(value[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func isTailscaleIP(ip net.IP) bool {
+	ipv4 := ip.To4()
+	return ipv4 != nil &&
+		ipv4[0] == 100 &&
+		ipv4[1] >= 64 &&
+		ipv4[1] <= 127
 }

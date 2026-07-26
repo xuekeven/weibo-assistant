@@ -1,7 +1,12 @@
 package browser
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +47,77 @@ func TestClassifyPageDetectsLoginAndChat(t *testing.T) {
 				t.Fatalf("classifyPage() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoginQRCodeTargetValidationAndScale(t *testing.T) {
+	valid := loginQRCodeTarget{
+		Found:  true,
+		X:      120,
+		Y:      80,
+		Width:  240,
+		Height: 240,
+	}
+	if !valid.valid() {
+		t.Fatal("expected QR code target to be valid")
+	}
+	if got := valid.screenshotScale(); got != 2 {
+		t.Fatalf("screenshotScale() = %v, want 2", got)
+	}
+
+	large := loginQRCodeTarget{
+		Found:  true,
+		X:      0,
+		Y:      0,
+		Width:  800,
+		Height: 800,
+	}
+	if got := large.screenshotScale(); got != 1.28 {
+		t.Fatalf("screenshotScale() = %v, want 1.28", got)
+	}
+
+	invalid := loginQRCodeTarget{
+		Found:  true,
+		X:      0,
+		Y:      0,
+		Width:  40,
+		Height: 40,
+	}
+	if invalid.valid() {
+		t.Fatal("expected undersized QR code target to be rejected")
+	}
+}
+
+func TestDecodeDataURLAndNormalizePNG(t *testing.T) {
+	sourceImage := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	sourceImage.Set(50, 50, color.Black)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, sourceImage); err != nil {
+		t.Fatalf("encode test PNG: %v", err)
+	}
+
+	source := "data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded.Bytes())
+	decoded, err := decodeDataURL(source)
+	if err != nil {
+		t.Fatalf("decodeDataURL() error = %v", err)
+	}
+	normalized, err := normalizePNG(decoded)
+	if err != nil {
+		t.Fatalf("normalizePNG() error = %v", err)
+	}
+	if !bytes.Equal(normalized, encoded.Bytes()) {
+		t.Fatal("expected an existing PNG resource to remain unchanged")
+	}
+}
+
+func TestNormalizePNGRejectsUnexpectedDimensions(t *testing.T) {
+	sourceImage := image.NewRGBA(image.Rect(0, 0, 40, 40))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, sourceImage); err != nil {
+		t.Fatalf("encode test PNG: %v", err)
+	}
+	if _, err := normalizePNG(encoded.Bytes()); err == nil {
+		t.Fatal("expected undersized QR resource to be rejected")
 	}
 }
 
@@ -531,5 +607,29 @@ func TestNetworkReconnectDelayUsesCappedExponentialBackoff(t *testing.T) {
 		if got := networkReconnectDelay(test.attempt); got != test.want {
 			t.Fatalf("attempt %d: expected %s, got %s", test.attempt, test.want, got)
 		}
+	}
+}
+
+func TestNetworkURLLogValueRedactsPayloadAndUnknownQueryValues(t *testing.T) {
+	dataURL := "data:image/png;base64,very-secret-payload"
+	if got := networkURLLogValue(dataURL); strings.Contains(got, "very-secret-payload") {
+		t.Fatalf("data URL payload leaked into log value: %q", got)
+	}
+
+	rawURL := "https://api.weibo.com/webim/groupchat/query_messages.json?fid=123&gid=456&token=secret&callback=private"
+	got := networkURLLogValue(rawURL)
+	if !strings.Contains(got, "fid=123") || !strings.Contains(got, "gid=456") {
+		t.Fatalf("useful identifiers missing from log value: %q", got)
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "private") {
+		t.Fatalf("sensitive query value leaked into log value: %q", got)
+	}
+	if !strings.Contains(got, "redacted-query-keys:2") {
+		t.Fatalf("redaction count missing from log value: %q", got)
+	}
+
+	relativeURL := "/messages?token=secret"
+	if got := networkURLLogValue(relativeURL); strings.Contains(got, "secret") || strings.Contains(got, "token") {
+		t.Fatalf("relative URL detail leaked into log value: %q", got)
 	}
 }

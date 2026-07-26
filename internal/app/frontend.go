@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ func RunFrontend(ctx context.Context, cfg config.Config) error {
 	}
 
 	server := &http.Server{
-		Addr:              ":" + strconv.Itoa(cfg.FrontendPort),
+		Addr:              net.JoinHostPort(cfg.FrontendBindAddr, strconv.Itoa(cfg.FrontendPort)),
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
