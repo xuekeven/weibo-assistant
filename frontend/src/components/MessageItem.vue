@@ -115,7 +115,7 @@ watch(
     <button type="button" :title="formatTime(message.sentAt || message.capturedAt)" @click="$emit('details', message)">{{ message.content || '微博群聊系统消息' }}</button>
   </article>
   <article v-else class="message-row" :class="{ 'own-message': isOwn }">
-    <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="message.senderAvatar" alt="" loading="lazy" @error="failedAvatarURL = message.senderAvatar || ''" />
+    <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="message.senderAvatar" alt="" loading="lazy" referrerpolicy="no-referrer" @error="failedAvatarURL = message.senderAvatar || ''" />
     <span v-else class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
     <div class="message-main">
       <div class="message-meta">

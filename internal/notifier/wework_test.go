@@ -2,8 +2,10 @@ package notifier
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,6 +22,13 @@ func TestSendTextWithIdempotencyHeader(t *testing.T) {
 		if got := request.Header.Get("Idempotency-Key"); got != "weibo-outbox-42" {
 			t.Fatalf("Idempotency-Key = %q", got)
 		}
+		var payload map[string]string
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode text payload: %v", err)
+		}
+		if want := environmentTextPrefix(runtime.GOOS) + "hello"; payload["content"] != want {
+			t.Fatalf("content = %q, want %q", payload["content"], want)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -30,6 +39,21 @@ func TestSendTextWithIdempotencyHeader(t *testing.T) {
 
 	if _, err := client.SendTextWithIdempotency(context.Background(), "hello", "weibo-outbox-42"); err != nil {
 		t.Fatalf("send text: %v", err)
+	}
+}
+
+func TestEnvironmentTextPrefix(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "darwin", want: "【开发】"},
+		{goos: "linux", want: "【生产】"},
+		{goos: "windows", want: ""},
+	} {
+		if got := environmentTextPrefix(test.goos); got != test.want {
+			t.Fatalf("environmentTextPrefix(%q) = %q, want %q", test.goos, got, test.want)
+		}
 	}
 }
 

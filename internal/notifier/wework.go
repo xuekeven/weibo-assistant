@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -61,7 +62,7 @@ func (c *WeworkClient) SendText(ctx context.Context, content string) (SendRespon
 }
 
 func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content string, idempotencyKey string) (SendResponse, error) {
-	payload := map[string]string{"content": content}
+	payload := map[string]string{"content": environmentTextPrefix(runtime.GOOS) + content}
 	if c.toUser != "" {
 		payload["touser"] = c.toUser
 	}
@@ -79,6 +80,17 @@ func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content stri
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	return c.doSend(req)
+}
+
+func environmentTextPrefix(goos string) string {
+	switch goos {
+	case "darwin":
+		return "【开发】"
+	case "linux":
+		return "【生产】"
+	default:
+		return ""
+	}
 }
 
 func (c *WeworkClient) SendImage(ctx context.Context, imagePath string) (SendResponse, error) {

@@ -64,7 +64,7 @@ defineEmits<{
         <a-skeleton v-for="index in 3" :key="index" active :title="false" :paragraph="{ rows: 2 }" class="group-skeleton" />
       </div>
       <button v-for="group in visibleGroups" :key="group.id" class="group-row" :class="{ active: String(group.id) === String(selectedGroupId) }" type="button" @click="$emit('select', group)">
-        <img v-if="group.avatarUrl" class="avatar" :src="group.avatarUrl" alt="" />
+        <img v-if="group.avatarUrl" class="avatar" :src="group.avatarUrl" alt="" referrerpolicy="no-referrer" />
         <span v-else class="avatar" :style="{ backgroundColor: avatarColor(group.weiboGroupId || group.name) }">{{ initials(group.name) }}</span>
         <span class="group-copy"><strong>{{ group.name }}</strong><span>{{ group.lastMessagePreview || '等待新消息' }}</span></span>
         <time>{{ formatTime(group.lastMessageAt || group.updatedAt, { seconds: false }) }}</time>
