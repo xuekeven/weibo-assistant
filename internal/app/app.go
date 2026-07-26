@@ -104,9 +104,11 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		<-metricsDone
 	}()
 	imageURLByFID := newImageURLCache(cfg.ImageCacheTTL, cfg.ImageCacheMaxItems)
+	weworkEnabled := strings.TrimSpace(cfg.WeworkRelayURL) != "" && strings.TrimSpace(cfg.WeworkRelayAPIKey) != ""
+	weworkClient := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
 	loginAlerts := newLoginAlertSender(
-		notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser),
-		strings.TrimSpace(cfg.WeworkRelayURL) != "" && strings.TrimSpace(cfg.WeworkRelayAPIKey) != "",
+		weworkClient,
+		weworkEnabled,
 	)
 	historyTarget := &historyPageTarget{}
 	disconnects := &disconnectWindow{}
@@ -157,6 +159,14 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 	} else {
 		slog.Warn("notification worker disabled because WEWORK_RELAY_API_KEY is empty")
 	}
+
+	sendMonitorLifecycleNotification(ctx, weworkClient, weworkEnabled, monitorStartedNotificationText)
+	defer func() {
+		// 主 context 在正常停服时已经取消，关闭通知必须使用独立的短超时。
+		notificationCtx, cancelNotification := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancelNotification()
+		sendMonitorLifecycleNotification(notificationCtx, weworkClient, weworkEnabled, monitorStoppedNotificationText)
+	}()
 
 	// browser 不直接访问数据库。它发现事件后调用下面的 OnXxx 回调。
 	return browser.RunMonitor(ctx, browser.MonitorOptions{
@@ -296,7 +306,10 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			metrics.trackedRequests.Store(int64(count))
 		},
 		OnLoginRequired: loginAlerts.Notify,
-		OnLoginRestored: loginAlerts.Reset,
+		OnLoginRestored: func() {
+			// 企微不可用不应阻塞微博监听恢复；后台进行有上限的重试。
+			go sendLoginRestoredNotification(ctx, loginAlerts)
+		},
 	})
 }
 

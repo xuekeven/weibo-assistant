@@ -135,9 +135,11 @@ go run ./cmd/weibo-assistant monitor
 2. 在 DOM 中定位二维码 `<img>`，通过 Chrome DevTools Protocol 读取其原始图片资源；读取失败时才降级为关闭提示弹层后截图。
 3. 调用企业微信中转接口，先发送文字登录提示，再发送二维码 PNG 图片。
 4. 保持 Chrome 和 monitor 运行，等待用户用微博 App 扫码。
-5. 检测到登录成功后，自动选择目标群并恢复消息监听。
+5. 检测到登录成功后，通过企业微信发送登录成功提示，自动选择目标群并恢复消息监听。
 
 这个流程支持纯命令行 Linux 服务器和 `HEADLESS=true`，不需要 VNC、远程桌面或物理显示器。登录态保存在 `WEIBO_PROFILE_DIR`，默认 `.weibo-profile`；不要把它提交到 Git。
+
+monitor 进入监控主循环和退出时，还会分别通过企业微信发送“微博群聊monitor已开启”和“微博群聊monitor已关闭”。关闭通知覆盖正常停止和可捕获的异常退出；`SIGKILL`、断电或操作系统崩溃无法执行退出通知。
 
 ### 4. 本地开发
 

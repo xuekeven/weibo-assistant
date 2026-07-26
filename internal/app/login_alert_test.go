@@ -11,6 +11,7 @@ import (
 
 type fakeLoginAlertClient struct {
 	calls         []string
+	texts         []string
 	imageFailures int
 	lastText      string
 	lastImageName string
@@ -19,6 +20,7 @@ type fakeLoginAlertClient struct {
 
 func (c *fakeLoginAlertClient) SendText(_ context.Context, content string) (notifier.SendResponse, error) {
 	c.calls = append(c.calls, "text")
+	c.texts = append(c.texts, content)
 	c.lastText = content
 	return notifier.SendResponse{ErrCode: 0, ErrMsg: "ok"}, nil
 }
@@ -91,6 +93,39 @@ func TestLoginAlertOnlySendsChangedQRCode(t *testing.T) {
 	}
 	if string(client.lastImage) != "qr-2" {
 		t.Fatalf("last image = %q", string(client.lastImage))
+	}
+}
+
+func TestLoginAlertSendsSuccessOnlyAfterQRCodeAndResetsEpisode(t *testing.T) {
+	client := &fakeLoginAlertClient{}
+	sender := newLoginAlertSender(client, true)
+
+	if sent, err := sender.NotifyRestored(context.Background()); err != nil || sent {
+		t.Fatalf("restore without QR: sent=%v err=%v", sent, err)
+	}
+	if err := sender.Notify(context.Background(), browser.LoginRequiredEvent{ScreenshotPNG: []byte("qr-1")}); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := sender.NotifyRestored(context.Background()); err != nil || !sent {
+		t.Fatalf("restore after QR: sent=%v err=%v", sent, err)
+	}
+	if sent, err := sender.NotifyRestored(context.Background()); err != nil || sent {
+		t.Fatalf("duplicate restore: sent=%v err=%v", sent, err)
+	}
+	if got := joinLoginAlertCalls(client.calls); got != "text,image,text" {
+		t.Fatalf("calls = %q", got)
+	}
+	if len(client.texts) != 2 ||
+		client.texts[0] != loginRequiredNotificationText ||
+		client.texts[1] != loginRestoredNotificationText {
+		t.Fatalf("texts = %#v", client.texts)
+	}
+
+	if err := sender.Notify(context.Background(), browser.LoginRequiredEvent{ScreenshotPNG: []byte("qr-2")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := joinLoginAlertCalls(client.calls); got != "text,image,text,text,image" {
+		t.Fatalf("next episode calls = %q", got)
 	}
 }
 
