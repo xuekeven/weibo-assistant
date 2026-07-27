@@ -24,20 +24,22 @@ import (
 
 type Server struct {
 	// Server 持有所有路由共享的依赖，作用类似前端应用中的全局 service 容器。
-	cfg      config.Config
-	store    *store.Store
-	notifier *notifier.WeworkClient
-	mux      *http.ServeMux
-	wsHub    *websocketHub
+	cfg          config.Config
+	store        *store.Store
+	notifier     *notifier.WeworkClient
+	mux          *http.ServeMux
+	wsHub        *websocketHub
+	avatarClient *http.Client
 }
 
 func NewServer(cfg config.Config, st *store.Store, notify *notifier.WeworkClient) *Server {
 	s := &Server{
-		cfg:      cfg,
-		store:    st,
-		notifier: notify,
-		mux:      http.NewServeMux(),
-		wsHub:    newWebsocketHub(),
+		cfg:          cfg,
+		store:        st,
+		notifier:     notify,
+		mux:          http.NewServeMux(),
+		wsHub:        newWebsocketHub(),
+		avatarClient: newAvatarHTTPClient(),
 	}
 	s.routes()
 	return s
@@ -60,6 +62,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleReady)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /api/config", s.handleAppConfig)
+	s.mux.HandleFunc("GET /api/media/avatar", s.handleAvatar)
 	s.mux.HandleFunc("GET /api/groups", s.handleListGroups)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("GET /api/messages", s.handleListMessages)

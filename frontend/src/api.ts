@@ -2,6 +2,21 @@ const defaultAPIBase = `${window.location.protocol}//${window.location.hostname}
 const API_BASE = (import.meta.env.VITE_API_BASE || defaultAPIBase).replace(/\/$/, '')
 const WS_BASE = API_BASE.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')
 
+export function avatarDisplayURL(rawURL?: string) {
+  const value = (rawURL || '').trim()
+  if (!value) return ''
+  try {
+    const parsed = new URL(value)
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+    if (parsed.protocol === 'https:' && (host === 'sinaimg.cn' || host.endsWith('.sinaimg.cn'))) {
+      return `${API_BASE}/api/media/avatar?url=${encodeURIComponent(parsed.toString())}`
+    }
+  } catch {
+    return value
+  }
+  return value
+}
+
 export type Group = {
   id: number
   weiboGroupId?: string
