@@ -942,10 +942,17 @@ button:disabled {
   padding: 0 8px !important;
 }
 
+.filters .sender-input-menu.ant-select-multiple .ant-select-selector::after {
+  display: none;
+  content: none;
+}
+
 .filters .sender-input-menu .ant-select-selection-overflow {
+  height: 100%;
+  min-height: 0;
   align-items: center;
+  align-content: center;
   gap: 4px;
-  min-height: 100%;
   flex-wrap: nowrap;
 }
 
@@ -963,6 +970,19 @@ button:disabled {
 .filters .sender-input-menu .ant-select-selection-search-input {
   height: 22px;
   line-height: 22px;
+}
+
+.filters .sender-input-menu .ant-select-selection-item-remove {
+  display: inline-flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.filters .sender-input-menu .ant-select-selection-item-remove .anticon,
+.filters .sender-input-menu .ant-select-selection-item-remove svg {
+  display: block;
 }
 
 .filters .ant-select-single.ant-select-lg .ant-select-selection-search {
