@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowDownOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
+import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
 import MessageFilters from './components/MessageFilters.vue'
@@ -265,7 +266,10 @@ const activeFilterLabels = computed(() => {
     labels.push({ key: 'sender', label: `发送人：${user?.nickname || selectedSenderId.value}` })
   }
   if (timeRange.value !== 'all') {
-    labels.push({ key: 'time', label: timeRangeOptions.find((item) => item.value === timeRange.value)?.label || timeRange.value })
+    const timeLabel = timeRange.value === 'custom' && customDate.value
+      ? `指定日期以后：${customDate.value}`
+      : timeRangeOptions.find((item) => item.value === timeRange.value)?.label || timeRange.value
+    labels.push({ key: 'time', label: timeLabel })
   }
   return labels
 })
@@ -954,7 +958,8 @@ async function exportMessages(request: MessageExportRequest) {
     const result = await downloadGroupMessages(selectedGroupId.value, {
       since: request.since,
       before: request.before,
-      format: request.format
+      format: request.format,
+      weiboSenderIds: request.weiboSenderIds
     })
     const url = URL.createObjectURL(result.blob)
     const link = document.createElement('a')
@@ -1024,7 +1029,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <a-config-provider :theme="antTheme">
+  <a-config-provider :theme="antTheme" :locale="zhCN">
     <main
       class="app-shell"
       :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen }"
@@ -1171,6 +1176,7 @@ onUnmounted(() => {
       :actionable-count="actionableNotificationCount"
       :daily-message-stats="dailyMessageStats"
       :selected-group="selectedGroup"
+      :users="users"
       :history-job="historyJob"
       :history-sync-active="historySyncActive"
       :history-sync-progressing="historySyncProgressing"

@@ -13,20 +13,27 @@ import {
 } from '@ant-design/icons-vue'
 import { computed, ref } from 'vue'
 import dayjs, { type Dayjs } from 'dayjs'
-import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule } from '../api'
+import type { Group, HistorySyncJob, NotificationOutboxItem, NotificationRule, User } from '../api'
 import type { DailyMessageStats, MessageExportFormat } from '../api'
 import { formatTime, notificationLabel } from '../utils/presentation'
 
 export type ManagementTab = 'notifications' | 'rules' | 'history' | 'stats'
 export type RuleForm = { name: string; groupId: string; senderId: string; messageType: string; enabled: boolean }
-export type MessageExportRequest = { format: MessageExportFormat; since: string; before: string; filename: string }
+export type MessageExportRequest = {
+  format: MessageExportFormat
+  since: string
+  before: string
+  filename: string
+  weiboSenderIds: string[]
+}
 
-defineProps<{
+const props = defineProps<{
   outboxItems: NotificationOutboxItem[]
   notificationRules: NotificationRule[]
   actionableCount: number
   dailyMessageStats: DailyMessageStats
   selectedGroup: Group | null
+  users: User[]
   historyJob: HistorySyncJob | null
   historySyncActive: boolean
   historySyncProgressing: boolean
@@ -50,7 +57,17 @@ const exportMode = ref<'day' | 'range'>('day')
 const exportDay = ref<Dayjs>(dayjs())
 const exportStart = ref<Dayjs>(dayjs().subtract(6, 'day'))
 const exportEnd = ref<Dayjs>(dayjs())
+const exportSenderIDs = ref<string[]>([])
 const exportRangeValid = computed(() => exportMode.value === 'day' || !exportStart.value.isAfter(exportEnd.value, 'day'))
+const exportSenderOptions = computed(() => {
+  const seen = new Set<string>()
+  return props.users.flatMap((user) => {
+    const value = (user.weiboUserId || '').trim()
+    if (!/^\d+$/.test(value) || seen.has(value)) return []
+    seen.add(value)
+    return [{ label: user.nickname || value, value }]
+  })
+})
 
 function setExportDay(dayOffset: number) {
   exportDay.value = dayjs().add(dayOffset, 'day').startOf('day')
@@ -90,7 +107,8 @@ function requestExport(format: MessageExportFormat) {
     format,
     since: start.toDate().toISOString(),
     before: end.toDate().toISOString(),
-    filename: `weibo-messages-${rangeLabel}.${format}`
+    filename: `weibo-messages-${rangeLabel}.${format}`,
+    weiboSenderIds: [...exportSenderIDs.value]
   })
 }
 
@@ -219,8 +237,8 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
         <div class="stats-section-head"><h3>导出消息</h3></div>
         <div class="export-form">
           <div class="export-field">
-            <span>导出范围</span>
-            <a-radio-group v-model:value="exportMode" class="export-mode-radios" aria-label="导出范围">
+            <span>范围</span>
+            <a-radio-group v-model:value="exportMode" class="export-mode-radios" aria-label="范围">
               <a-radio value="day">导出单天</a-radio>
               <a-radio value="range">导出区间</a-radio>
             </a-radio-group>
@@ -243,6 +261,21 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
               <button type="button" :class="{ active: isExportRange('month') }" :aria-pressed="isExportRange('month')" @click="setExportRange('month')">本月</button>
             </div>
           </template>
+          <div class="export-field">
+            <span>人员</span>
+            <a-select
+              v-model:value="exportSenderIDs"
+              mode="multiple"
+              size="large"
+              show-search
+              allow-clear
+              :options="exportSenderOptions"
+              option-filter-prop="label"
+              placeholder="所有人"
+              not-found-content="没有匹配的人员"
+              aria-label="人员"
+            />
+          </div>
           <p v-if="!exportRangeValid" class="export-error">开始日期不能晚于结束日期。</p>
           <p v-else-if="exportError" class="export-error">{{ exportError }}</p>
         </div>

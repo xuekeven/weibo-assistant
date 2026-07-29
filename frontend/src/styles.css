@@ -816,15 +816,6 @@ button:disabled {
   padding: 8px 16px;
 }
 
-.filters.has-custom-date .custom-date-field {
-  grid-column: 3;
-}
-
-.filters.has-custom-date .filter-actions {
-  grid-column: 4;
-  grid-row: 1;
-}
-
 .filters label,
 .filters label:first-child,
 .filters label:nth-child(2) {
@@ -1395,8 +1386,7 @@ button:disabled {
 }
 
 @container (max-width: 720px) {
-  .filters,
-  .filters.has-custom-date {
+  .filters {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
@@ -1415,13 +1405,7 @@ button:disabled {
     grid-row: 2;
   }
 
-  .filters.has-custom-date .custom-date-field {
-    grid-column: 1 / -1;
-    grid-row: 3;
-  }
-
-  .filters .filter-actions,
-  .filters.has-custom-date .filter-actions {
+  .filters .filter-actions {
     grid-column: 4;
     grid-row: 1;
     justify-content: flex-end;
@@ -1429,17 +1413,14 @@ button:disabled {
 }
 
 @container (max-width: 480px) {
-  .filters,
-  .filters.has-custom-date {
+  .filters {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .filters .keyword-field,
   .filters .sender-field,
   .filters .compact-field,
-  .filters.has-custom-date .custom-date-field,
-  .filters .filter-actions,
-  .filters.has-custom-date .filter-actions {
+  .filters .filter-actions {
     grid-column: 1;
     grid-row: auto;
   }
@@ -1462,10 +1443,6 @@ button:disabled {
 
   .filters .compact-field {
     grid-column: 2;
-  }
-
-  .filters.has-custom-date .custom-date-field {
-    grid-column: 1 / -1;
   }
 
   .bubble {
@@ -1874,8 +1851,32 @@ select:focus-visible,
   font-size: 10px;
 }
 
-.custom-date-field {
-  grid-column: auto;
+.custom-date-dialog-content {
+  display: grid;
+  gap: 18px;
+  padding: 6px 0 10px;
+}
+
+.custom-date-dialog-content p {
+  margin: 0;
+  color: #6b7882;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.custom-date-dialog-content label {
+  display: grid;
+  gap: 8px;
+}
+
+.custom-date-dialog-content label > span {
+  color: #344551;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.custom-date-dialog-content .ant-picker {
+  width: 100%;
 }
 
 .load-older {

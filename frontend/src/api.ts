@@ -236,8 +236,16 @@ export async function downloadGroupMessages(groupId: number, params: {
   since: string
   before: string
   format: MessageExportFormat
+  weiboSenderIds?: string[]
 }) {
-  const query = new URLSearchParams(params)
+  const query = new URLSearchParams({
+    since: params.since,
+    before: params.before,
+    format: params.format
+  })
+  for (const senderID of params.weiboSenderIds || []) {
+    query.append('weiboSenderId', senderID)
+  }
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 60_000)
   try {

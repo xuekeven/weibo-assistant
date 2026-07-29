@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -58,11 +59,18 @@ func (s *Store) ListGroupMessagesForExport(
 	groupID int64,
 	since time.Time,
 	before time.Time,
+	weiboSenderIDs []string,
 ) ([]ExportMessage, error) {
 	if groupID <= 0 || !since.Before(before) {
 		return nil, errors.New("invalid message export range")
 	}
-	rows, err := s.pool.Query(ctx, `
+	args := []any{groupID, since, before}
+	senderCondition := ""
+	if len(weiboSenderIDs) > 0 {
+		args = append(args, weiboSenderIDs)
+		senderCondition = "and u.weibo_user_id = any($4::text[])"
+	}
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
 		select m.id,
 		       coalesce(m.weibo_message_id, ''),
 		       g.name,
@@ -81,8 +89,9 @@ func (s *Store) ListGroupMessagesForExport(
 		   and u.weibo_user_id ~ '^[0-9]+$'
 		   and m.message_type not in ('system', 'event', 'recall')
 		   and coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'
+		   %s
 		 order by coalesce(m.sent_at, m.captured_at), m.id
-	`, groupID, since, before)
+	`, senderCondition), args...)
 	if err != nil {
 		return nil, err
 	}

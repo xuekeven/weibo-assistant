@@ -67,7 +67,12 @@ func (s *Server) handleExportGroupMessages(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, errors.New("format must be csv, json, or md"))
 		return
 	}
-	messages, err := s.store.ListGroupMessagesForExport(r.Context(), groupID, since, before)
+	weiboSenderIDs, err := messageExportSenderIDs(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	messages, err := s.store.ListGroupMessagesForExport(r.Context(), groupID, since, before, weiboSenderIDs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -90,6 +95,28 @@ func (s *Server) handleExportGroupMessages(w http.ResponseWriter, r *http.Reques
 	if _, err := w.Write(content); err != nil {
 		slog.Warn("write message export failed", "groupID", groupID, "format", format, "error", err)
 	}
+}
+
+func messageExportSenderIDs(r *http.Request) ([]string, error) {
+	const maxSelectedSenders = 200
+	values := r.URL.Query()["weiboSenderId"]
+	senderIDs := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		senderID := strings.TrimSpace(value)
+		if senderID == "" {
+			continue
+		}
+		if _, ok := seen[senderID]; ok {
+			continue
+		}
+		seen[senderID] = struct{}{}
+		senderIDs = append(senderIDs, senderID)
+		if len(senderIDs) > maxSelectedSenders {
+			return nil, errors.New("at most 200 weiboSenderId values are allowed")
+		}
+	}
+	return senderIDs, nil
 }
 
 func requiredQueryTime(w http.ResponseWriter, r *http.Request, key string) (time.Time, bool) {
