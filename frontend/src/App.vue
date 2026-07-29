@@ -502,8 +502,8 @@ function messageMatchesCurrentFilters(message: Message) {
   if (since && new Date(message.sentAt || message.capturedAt).getTime() < new Date(since).getTime()) return false
   const keyword = query.value.trim().toLowerCase()
   if (keyword) {
-    const haystack = (message.content || '').trim().toLowerCase()
-    if (haystack !== keyword) return false
+    const haystack = (message.content || '').toLowerCase()
+    if (!haystack.includes(keyword)) return false
   }
   return true
 }

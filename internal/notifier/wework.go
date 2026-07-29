@@ -83,14 +83,10 @@ func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content stri
 }
 
 func environmentTextPrefix(goos string) string {
-	switch goos {
-	case "darwin":
-		return "【开发】"
-	case "linux":
-		return "【生产】"
-	default:
+	if goos == "linux" {
 		return ""
 	}
+	return "【测试】"
 }
 
 func (c *WeworkClient) SendImage(ctx context.Context, imagePath string) (SendResponse, error) {

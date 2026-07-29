@@ -29,7 +29,7 @@ defineEmits<{
 
 <template>
   <form class="filters" :class="{ 'has-custom-date': timeRange === 'custom' }" @submit.prevent="$emit('apply')">
-    <label class="filter-field keyword-field"><span>关键词</span><a-input v-model:value="query" size="large" placeholder="精确匹配消息正文" class="message-search-input"><template #prefix><SearchOutlined /></template></a-input></label>
+    <label class="filter-field keyword-field"><span>关键词</span><a-input v-model:value="query" size="large" placeholder="模糊搜索消息正文" class="message-search-input"><template #prefix><SearchOutlined /></template></a-input></label>
     <label class="filter-field sender-field">
       <span>发送人</span>
       <a-select v-model:value="sender" size="large" show-search :options="senderOptions" option-filter-prop="label" placeholder="搜索发送人" class="sender-input-menu" not-found-content="没有匹配的发送人" @change="$emit('senderChange')" />

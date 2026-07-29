@@ -47,9 +47,9 @@ func TestEnvironmentTextPrefix(t *testing.T) {
 		goos string
 		want string
 	}{
-		{goos: "darwin", want: "【开发】"},
-		{goos: "linux", want: "【生产】"},
-		{goos: "windows", want: ""},
+		{goos: "darwin", want: "【测试】"},
+		{goos: "linux", want: ""},
+		{goos: "windows", want: "【测试】"},
 	} {
 		if got := environmentTextPrefix(test.goos); got != test.want {
 			t.Fatalf("environmentTextPrefix(%q) = %q, want %q", test.goos, got, test.want)

@@ -808,7 +808,7 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		conditions = append(conditions, "coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'")
 	}
 	if params.Query = strings.TrimSpace(params.Query); params.Query != "" {
-		conditions = append(conditions, "lower(btrim(coalesce(m.content, ''))) = lower("+addArg(params.Query)+")")
+		conditions = append(conditions, "strpos(lower(coalesce(m.content, '')), lower("+addArg(params.Query)+")) > 0")
 	}
 	if params.Since != nil {
 		conditions = append(conditions, "coalesce(m.sent_at, m.captured_at) >= "+addArg(*params.Since))
