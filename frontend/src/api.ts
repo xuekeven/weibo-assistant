@@ -204,7 +204,7 @@ export function listGroups(limit = 100) {
 export function listMessages(params: {
   groupId?: number
   weiboGroupId?: string
-  weiboSenderId?: string
+  weiboSenderIds?: string[]
   messageType?: string
   q?: string
   since?: string
@@ -216,7 +216,9 @@ export function listMessages(params: {
   query.set('includeRaw', 'false')
   if (params.groupId) query.set('groupId', String(params.groupId))
   if (params.weiboGroupId) query.set('weiboGroupId', params.weiboGroupId)
-  if (params.weiboSenderId) query.set('weiboSenderId', params.weiboSenderId)
+  for (const senderID of params.weiboSenderIds || []) {
+    query.append('weiboSenderId', senderID)
+  }
   if (params.messageType) query.set('messageType', params.messageType)
   if (params.q) query.set('q', params.q)
   if (params.since) query.set('since', params.since)

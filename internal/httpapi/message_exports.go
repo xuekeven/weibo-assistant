@@ -67,7 +67,7 @@ func (s *Server) handleExportGroupMessages(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, errors.New("format must be csv, json, or md"))
 		return
 	}
-	weiboSenderIDs, err := messageExportSenderIDs(r)
+	weiboSenderIDs, err := queryWeiboSenderIDs(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -97,7 +97,7 @@ func (s *Server) handleExportGroupMessages(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func messageExportSenderIDs(r *http.Request) ([]string, error) {
+func queryWeiboSenderIDs(r *http.Request) ([]string, error) {
 	const maxSelectedSenders = 200
 	values := r.URL.Query()["weiboSenderId"]
 	senderIDs := make([]string, 0, len(values))

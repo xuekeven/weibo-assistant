@@ -127,16 +127,16 @@ type ListUsersParams struct {
 }
 
 type ListMessagesParams struct {
-	GroupID       int64
-	WeiboGroupID  string
-	SenderID      int64
-	WeiboSenderID string
-	MessageType   string
-	Query         string
-	Since         *time.Time
-	Before        *time.Time
-	Limit         int
-	IncludeRaw    bool
+	GroupID        int64
+	WeiboGroupID   string
+	SenderID       int64
+	WeiboSenderIDs []string
+	MessageType    string
+	Query          string
+	Since          *time.Time
+	Before         *time.Time
+	Limit          int
+	IncludeRaw     bool
 }
 
 func (s *Store) UpsertGroup(ctx context.Context, params UpsertGroupParams) (Group, error) {
@@ -797,8 +797,8 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		conditions = append(conditions, "m.sender_id = "+addArg(params.SenderID))
 		conditions = append(conditions, "m.message_type not in ('system', 'event')")
 	}
-	if params.WeiboSenderID = strings.TrimSpace(params.WeiboSenderID); params.WeiboSenderID != "" {
-		conditions = append(conditions, "u.weibo_user_id = "+addArg(params.WeiboSenderID))
+	if len(params.WeiboSenderIDs) > 0 {
+		conditions = append(conditions, "u.weibo_user_id = any("+addArg(params.WeiboSenderIDs)+"::text[])")
 		conditions = append(conditions, "m.message_type not in ('system', 'event')")
 	}
 	if params.MessageType = strings.TrimSpace(params.MessageType); params.MessageType != "" {

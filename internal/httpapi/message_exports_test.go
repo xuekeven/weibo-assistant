@@ -11,12 +11,12 @@ import (
 
 func TestMessageExportSenderIDs(t *testing.T) {
 	request := httptest.NewRequest("GET", "/api/groups/1/messages/export?weiboSenderId=123&weiboSenderId=456&weiboSenderId=123&weiboSenderId=+", nil)
-	got, err := messageExportSenderIDs(request)
+	got, err := queryWeiboSenderIDs(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || got[0] != "123" || got[1] != "456" {
-		t.Fatalf("messageExportSenderIDs() = %#v, want [123 456]", got)
+		t.Fatalf("queryWeiboSenderIDs() = %#v, want [123 456]", got)
 	}
 }
 

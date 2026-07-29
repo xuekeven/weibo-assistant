@@ -74,18 +74,23 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	weiboSenderIDs, err := queryWeiboSenderIDs(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	messages, err := s.store.ListMessages(r.Context(), store.ListMessagesParams{
-		GroupID:       groupID,
-		WeiboGroupID:  r.URL.Query().Get("weiboGroupId"),
-		SenderID:      senderID,
-		WeiboSenderID: r.URL.Query().Get("weiboSenderId"),
-		MessageType:   r.URL.Query().Get("messageType"),
-		Query:         r.URL.Query().Get("q"),
-		Since:         since,
-		Before:        before,
-		Limit:         limit,
-		IncludeRaw:    includeRaw,
+		GroupID:        groupID,
+		WeiboGroupID:   r.URL.Query().Get("weiboGroupId"),
+		SenderID:       senderID,
+		WeiboSenderIDs: weiboSenderIDs,
+		MessageType:    r.URL.Query().Get("messageType"),
+		Query:          r.URL.Query().Get("q"),
+		Since:          since,
+		Before:         before,
+		Limit:          limit,
+		IncludeRaw:     includeRaw,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

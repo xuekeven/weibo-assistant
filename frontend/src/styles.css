@@ -879,9 +879,26 @@ button:disabled {
   line-height: calc(var(--control-height) - 2px);
 }
 
+.filters .ant-input,
+.filters .ant-select-selection-item,
+.filters .ant-select-selection-placeholder,
+.filters .ant-select-selection-search-input {
+  font-size: 14px !important;
+}
+
+.filter-select-dropdown .ant-select-item {
+  font-size: 14px;
+}
+
 .filters .ant-select-selection-item,
 .filters .ant-select-selection-placeholder {
   line-height: calc(var(--control-height) - 2px);
+}
+
+.filters .ant-select-multiple .ant-select-selection-item {
+  height: 24px;
+  margin-block: 5px;
+  line-height: 22px;
 }
 
 .filters .ant-select-single.ant-select-lg .ant-select-selection-search {
@@ -1694,6 +1711,7 @@ button.image-item {
   margin-top: 6px;
   color: #788690;
   font-size: 11px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1719,15 +1737,15 @@ img.avatar {
 }
 
 .unread-badge .ant-badge-count {
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
   padding: 0;
   border-radius: 50%;
   background: #17785d;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
-  line-height: 20px;
+  line-height: 16px;
   box-shadow: none;
 }
 

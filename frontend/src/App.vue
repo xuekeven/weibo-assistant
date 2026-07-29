@@ -60,7 +60,7 @@ const monitor = ref<MonitorStatus | null>(null)
 const selectedGroupId = ref<number | null>(null)
 const groupQuery = ref('')
 const query = ref('')
-const selectedSenderId = ref('')
+const selectedSenderIds = ref<string[]>([])
 const timeRange = ref('all')
 const customDate = ref('')
 const loading = ref(false)
@@ -98,7 +98,6 @@ const messageRequests = createLatestRequestGate()
 const olderMessageRequests = createLatestRequestGate()
 const historyRequests = createLatestRequestGate()
 const detailRequests = createLatestRequestGate()
-const allSelectValue = '__all__'
 const antTheme = {
   token: {
     colorPrimary: '#17785d',
@@ -117,21 +116,13 @@ const timeRangeOptions = [
 
 const senderOptions = computed(() => {
   const targetSenderId = appConfig.value.targetSenderId.trim()
-  const options = [
-    { label: '全部发送人', value: allSelectValue },
-    ...users.value.filter((user) => user.weiboUserId).map((user) => ({ label: user.nickname || '未命名用户', value: user.weiboUserId || '' }))
-  ]
+  const options = users.value
+    .filter((user) => user.weiboUserId)
+    .map((user) => ({ label: user.nickname || '未命名用户', value: user.weiboUserId || '' }))
   if (targetSenderId && !options.some((option) => option.value === targetSenderId)) {
     options.push({ label: `关注用户（${targetSenderId}）`, value: targetSenderId })
   }
   return options
-})
-
-// Reka UI 不允许 SelectItem 使用空字符串作为 value。界面层用哨兵值表示
-// “全部”，读写业务状态时再转换回空字符串，避免影响 API 查询参数。
-const senderSelectValue = computed({
-  get: () => selectedSenderId.value || allSelectValue,
-  set: (value: string) => { selectedSenderId.value = value === allSelectValue ? '' : value }
 })
 
 const monitorStatusItems = [
@@ -243,7 +234,7 @@ const visibleGroups = computed(() => {
 })
 
 const hasActiveFilters = computed(() => {
-  return Boolean(query.value.trim() || selectedSenderId.value || timeRange.value !== 'all')
+  return Boolean(query.value.trim() || selectedSenderIds.value.length || timeRange.value !== 'all')
 })
 
 const historySyncActive = computed(() => historyJob.value?.status === 'pending' || historyJob.value?.status === 'running')
@@ -261,9 +252,12 @@ const loadOlderLabel = computed(() => {
 const activeFilterLabels = computed(() => {
   const labels: Array<{ key: string; label: string }> = []
   if (query.value.trim()) labels.push({ key: 'query', label: `关键词：${query.value.trim()}` })
-  if (selectedSenderId.value) {
-    const user = users.value.find((item) => item.weiboUserId === selectedSenderId.value)
-    labels.push({ key: 'sender', label: `发送人：${user?.nickname || selectedSenderId.value}` })
+  if (selectedSenderIds.value.length) {
+    const names = selectedSenderIds.value.map((senderID) => {
+      return users.value.find((item) => item.weiboUserId === senderID)?.nickname || senderID
+    })
+    const senderLabel = names.length > 3 ? `${names.slice(0, 2).join('、')} 等 ${names.length} 人` : names.join('、')
+    labels.push({ key: 'sender', label: `发送人：${senderLabel}` })
   }
   if (timeRange.value !== 'all') {
     const timeLabel = timeRange.value === 'custom' && customDate.value
@@ -365,12 +359,11 @@ async function refreshMessages() {
       console.warn('refresh daily message stats failed', err)
     })
     const groupID = selectedGroupId.value || undefined
-    const senderID = selectedSenderId.value || undefined
     const keyword = query.value.trim() || undefined
     const since = filterSince(timeRange.value)
     const result = await listMessages({
       groupId: groupID,
-      weiboSenderId: senderID,
+      weiboSenderIds: selectedSenderIds.value,
       q: keyword,
       since,
       limit: 50
@@ -397,7 +390,7 @@ async function refreshMessages() {
 function currentMessageRequestKey() {
   return JSON.stringify({
     groupID: selectedGroupId.value,
-    senderID: selectedSenderId.value,
+    senderIDs: selectedSenderIds.value,
     query: query.value.trim(),
     timeRange: timeRange.value,
     customDate: customDate.value
@@ -459,20 +452,20 @@ async function applySenderFilter() {
 async function viewTargetSender() {
   const targetSenderId = appConfig.value.targetSenderId.trim()
   if (!targetSenderId) return
-  selectedSenderId.value = targetSenderId
+  selectedSenderIds.value = [targetSenderId]
   await applyFilters()
 }
 
 async function clearFilters() {
   query.value = ''
-  selectedSenderId.value = ''
+  selectedSenderIds.value = []
   timeRange.value = 'all'
   await applyFilters()
 }
 
 async function clearFilter(key: string) {
   if (key === 'query') query.value = ''
-  if (key === 'sender') selectedSenderId.value = ''
+  if (key === 'sender') selectedSenderIds.value = []
   if (key === 'time') timeRange.value = 'all'
   await applyFilters()
 }
@@ -501,8 +494,8 @@ async function selectGroup(group: Group) {
 
 function messageMatchesCurrentFilters(message: Message) {
   if (selectedGroupId.value && String(message.groupId) !== String(selectedGroupId.value)) return false
-  const sender = selectedSenderId.value
-  if (sender && (message.messageType === 'system' || message.messageType === 'event' || message.weiboSenderId !== sender)) return false
+  const senderIDs = selectedSenderIds.value
+  if (senderIDs.length && (message.messageType === 'system' || message.messageType === 'event' || !senderIDs.includes(message.weiboSenderId || ''))) return false
   const since = filterSince(timeRange.value)
   if (since && new Date(message.sentAt || message.capturedAt).getTime() < new Date(since).getTime()) return false
   const keyword = query.value.trim().toLowerCase()
@@ -743,7 +736,7 @@ async function loadOlderMessages(triggerRemote = true) {
   try {
     const result = await listMessages({
       groupId: selectedGroupId.value || undefined,
-      weiboSenderId: selectedSenderId.value || undefined,
+      weiboSenderIds: selectedSenderIds.value,
       q: query.value.trim() || undefined,
       since: filterSince(timeRange.value),
       before: oldest?.sentAt || oldest?.capturedAt,
@@ -890,7 +883,7 @@ async function openMessageDetails(message: Message) {
 }
 
 async function filterByMessageSender(message: Message) {
-  selectedSenderId.value = message.weiboSenderId || ''
+  selectedSenderIds.value = message.weiboSenderId ? [message.weiboSenderId] : []
   selectedMessage.value = null
   await applyFilters()
 }
@@ -1090,7 +1083,7 @@ onUnmounted(() => {
 
       <MessageFilters
         v-model:query="query"
-        v-model:sender="senderSelectValue"
+        v-model:sender="selectedSenderIds"
         v-model:time-range="timeRange"
         v-model:custom-date="customDate"
         :sender-options="senderOptions"
