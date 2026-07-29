@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDownOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, ExportOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
@@ -53,7 +53,7 @@ const notifications = ref<NotificationEvent[]>([])
 const notificationRules = ref<NotificationRule[]>([])
 const outboxItems = ref<NotificationOutboxItem[]>([])
 const readiness = ref<Record<string, unknown>>({})
-const appConfig = ref({ targetSenderId: '', currentUserId: '' })
+const appConfig = ref({ targetSenderId: '', currentUserId: '', weiboChatUrl: '' })
 const dailyMessageStats = ref<DailyMessageStats>({ today: 0, yesterday: 0 })
 const users = ref<User[]>([])
 const monitor = ref<MonitorStatus | null>(null)
@@ -337,7 +337,8 @@ async function runRefresh() {
   readiness.value = readinessResult
   appConfig.value = {
     targetSenderId: configResult.targetSenderId || '',
-    currentUserId: configResult.currentUserId || ''
+    currentUserId: configResult.currentUserId || '',
+    weiboChatUrl: configResult.weiboChatUrl || ''
   }
 
   if (!selectedGroupId.value && visibleGroups.value.length > 0) {
@@ -1058,7 +1059,18 @@ onUnmounted(() => {
       <header class="chat-head">
         <div>
           <a-button class="mobile-menu-button" aria-label="打开群聊列表" @click="openMobileSidebar"><MenuOutlined /></a-button>
-          <h2>{{ selectedGroup?.name || '消息流' }}</h2>
+          <a
+            v-if="selectedGroup && appConfig.weiboChatUrl"
+            class="chat-group-link"
+            :href="appConfig.weiboChatUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            :aria-label="`在新页签打开微博网页版群聊：${selectedGroup.name}`"
+          >
+            <span>{{ selectedGroup.name }}</span>
+            <ExportOutlined aria-hidden="true" />
+          </a>
+          <h2 v-else>{{ selectedGroup?.name || '消息流' }}</h2>
         </div>
         <div class="head-actions">
           <a-button

@@ -106,6 +106,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"targetSenderId": s.cfg.TargetSenderID,
 		"currentUserId":  currentUserID,
+		"weiboChatUrl":   s.cfg.WeiboChatURL,
 	})
 }
 

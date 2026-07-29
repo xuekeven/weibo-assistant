@@ -141,6 +141,7 @@ export type NotificationOutboxItem = {
 export type AppConfig = {
   targetSenderId?: string
   currentUserId?: string
+  weiboChatUrl?: string
 }
 
 export type DailyMessageStats = {

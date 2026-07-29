@@ -813,7 +813,7 @@ button:disabled {
   align-items: center;
   gap: 12px;
   min-height: auto;
-  padding: 8px 16px;
+  padding: 11px 16px;
 }
 
 .filters label,
@@ -1553,6 +1553,39 @@ button.image-item {
   gap: 8px;
 }
 
+.chat-group-link {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: #182129;
+  font-size: 16px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.chat-group-link > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-group-link .anticon {
+  flex: 0 0 auto;
+  color: #70808b;
+  font-size: 12px;
+}
+
+.chat-group-link:hover,
+.chat-group-link:focus-visible {
+  color: #17785d;
+}
+
+.chat-group-link:hover .anticon,
+.chat-group-link:focus-visible .anticon {
+  color: inherit;
+}
+
 .group-pane {
   position: relative;
 }
@@ -1905,7 +1938,6 @@ select:focus-visible,
 
 .card-actions button,
 .export-actions button,
-.detail-actions button,
 .notify-row > button {
   min-height: 26px;
   padding: 0 8px;
@@ -2002,9 +2034,19 @@ select:focus-visible,
 }
 
 .panel-close-button.ant-btn {
+  display: inline-flex;
   width: 34px;
   height: 34px;
+  min-width: 34px;
+  align-items: center;
+  justify-content: center;
   padding: 0;
+  line-height: 1;
+}
+
+.panel-close-button.ant-btn .anticon,
+.panel-close-button.ant-btn .anticon svg {
+  display: block;
 }
 
 .control-center .notify-list {
@@ -2593,12 +2635,6 @@ select:focus-visible,
   gap: 10px;
 }
 
-.detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
 .export-actions button {
   display: flex;
   min-width: 0;
@@ -2617,29 +2653,100 @@ select:focus-visible,
   right: 0;
   bottom: 0;
   z-index: 90;
+  display: flex;
   width: min(440px, 96vw);
+  flex-direction: column;
   border-left: 1px solid #d7dee4;
   background: #f8fafb;
   box-shadow: -18px 0 42px rgba(28, 35, 41, 0.18);
 }
 
+.detail-pane-head {
+  flex: 0 0 auto;
+}
+
+.detail-pane-head h2 {
+  font-size: 18px;
+}
+
+.detail-toolbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e1e6e9;
+  background: #fff;
+}
+
+.detail-toolbar .ant-btn {
+  min-width: 0;
+  height: 36px;
+  padding-inline: 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: none;
+}
+
 .detail-content {
-  height: calc(100vh - 64px);
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
+  padding: 18px 16px 28px;
+}
+
+.detail-card {
   padding: 16px;
+  border: 1px solid #e0e6ea;
+  border-radius: 10px;
+  background: #fff;
 }
 
 .detail-content dl {
   display: grid;
-  grid-template-columns: 90px minmax(0, 1fr);
-  gap: 8px 10px;
+  grid-template-columns: 94px minmax(0, 1fr);
+  gap: 10px 12px;
+  margin: 0;
   font-size: 12px;
 }
 
-.detail-content dt { color: #74818b; }
-.detail-content dd { margin: 0; overflow-wrap: anywhere; }
-.detail-content h3 { margin: 18px 0 8px; font-size: 13px; }
-.detail-content pre { padding: 12px; border-radius: 8px; background: #fff; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail-content dt {
+  color: #7a8893;
+  font-weight: 600;
+}
+
+.detail-content dd {
+  margin: 0;
+  color: #26343e;
+  overflow-wrap: anywhere;
+}
+
+.detail-section {
+  margin-top: 20px;
+}
+
+.detail-content h3 {
+  margin: 0 0 9px;
+  color: #26343e;
+  font-size: 14px;
+}
+
+.detail-content pre {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #e6ebee;
+  border-radius: 10px;
+  background: #fff;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detail-message-body {
+  color: #1f2d36;
+  font-family: inherit;
+  font-size: 14px;
+}
 
 .detail-events {
   display: grid;
@@ -2659,7 +2766,30 @@ select:focus-visible,
 }
 
 .detail-events small { grid-column: 1 / -1; color: #9f2a20; }
-.muted-text { margin-bottom: 12px; color: #74818b; font-size: 12px; }
+.muted-text {
+  padding: 14px;
+  border: 1px dashed #d7e0e5;
+  border-radius: 9px;
+  background: #fff;
+  color: #74818b;
+  font-size: 12px;
+}
+
+.detail-raw {
+  margin-top: 18px;
+  color: #40515d;
+  font-size: 13px;
+}
+
+.detail-raw summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.detail-raw pre {
+  margin-top: 10px;
+  font-size: 11px;
+}
 
 @media (max-width: 900px) {
   .control-center,
