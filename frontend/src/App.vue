@@ -1040,7 +1040,6 @@ onUnmounted(() => {
     <GroupSidebar
       v-model:group-query="groupQuery"
       v-model:monitor-expanded="monitorExpanded"
-      :groups="groups"
       :visible-groups="visibleGroups"
       :selected-group-id="selectedGroupId"
       :loading="loading"

@@ -4,7 +4,6 @@ import { avatarDisplayURL, type Group, type MonitorStatus } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
 
 defineProps<{
-  groups: Group[]
   visibleGroups: Group[]
   selectedGroupId: number | null
   loading: boolean
@@ -31,7 +30,6 @@ defineEmits<{
     <div class="pane-head">
       <div>
         <h1>微博助手</h1>
-        <p>{{ groupQuery ? `${visibleGroups.length}/${groups.length}` : visibleGroups.length }} 个群聊</p>
       </div>
       <div class="pane-actions">
         <a-button size="small" aria-label="刷新全部数据" :aria-busy="loading" :disabled="loading" @click="$emit('refresh')"><ReloadOutlined :spin="loading" /></a-button>
@@ -68,7 +66,12 @@ defineEmits<{
         <span v-else class="avatar" :style="{ backgroundColor: avatarColor(group.weiboGroupId || group.name) }">{{ initials(group.name) }}</span>
         <span class="group-copy"><strong>{{ group.name }}</strong><span>{{ group.lastMessagePreview || '等待新消息' }}</span></span>
         <time>{{ formatTime(group.lastMessageAt || group.updatedAt, { seconds: false }) }}</time>
-        <a-badge v-if="unreadByGroup[group.id]" class="unread-badge" :count="unreadByGroup[group.id]" :overflow-count="99" />
+        <a-badge
+          v-if="unreadByGroup[group.id]"
+          class="unread-badge"
+          :count="Math.min(unreadByGroup[group.id], 99)"
+          :title="`${unreadByGroup[group.id]} 条未读消息`"
+        />
       </button>
       <div v-if="!loading && visibleGroups.length === 0" class="sidebar-empty">
         <strong>{{ groupQuery ? '没有匹配的群聊' : '还没有群聊' }}</strong>
