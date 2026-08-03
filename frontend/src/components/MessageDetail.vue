@@ -8,6 +8,7 @@ defineEmits<{ close: [] }>()
 </script>
 
 <template>
+  <div class="message-detail-backdrop" role="presentation" @click="$emit('close')"></div>
   <aside class="message-detail-pane">
     <div class="pane-head detail-pane-head">
       <div><h2>消息详情</h2><p>消息 #{{ message.id }}</p></div>

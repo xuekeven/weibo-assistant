@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BellOutlined, CopyOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { BellOutlined, CopyOutlined, FileTextOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { avatarDisplayURL, type Attachment, type Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
@@ -145,7 +145,7 @@ watch(
         <strong :title="message.weiboSenderId ? `微博用户 ID：${message.weiboSenderId}` : undefined">{{ message.senderName || message.weiboSenderId || '未知发送人' }}</strong>
         <time :title="formatTime(message.sentAt || message.capturedAt)">{{ formatTime(message.sentAt || message.capturedAt, { seconds: false }) }}</time>
         <span class="message-actions">
-          <button class="message-secondary-action" type="button" @click="$emit('details', message)">详情</button>
+          <button class="message-secondary-action" type="button" @click="$emit('details', message)"><FileTextOutlined />详情</button>
           <button class="message-secondary-action" type="button" @click="$emit('copy', message)"><CopyOutlined />复制正文</button>
           <button class="message-secondary-action" type="button" @click="$emit('filterSender', message)"><UserOutlined />只看此人</button>
           <button class="message-secondary-action" type="button" @click="$emit('createRule', message)"><BellOutlined />创建通知规则</button>

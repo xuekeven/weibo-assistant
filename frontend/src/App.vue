@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowDownOutlined, ExportOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
+import { message as antMessage } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
@@ -891,8 +892,47 @@ function closeRuleDialog() {
   panelError.value = ''
 }
 
+async function writeClipboardText(content: string) {
+  if (window.isSecureContext && window.navigator.clipboard?.writeText) {
+    try {
+      await window.navigator.clipboard.writeText(content)
+      return
+    } catch {
+      // 浏览器可能提供 Clipboard API，但通过权限策略拒绝当前页面使用。
+    }
+  }
+
+  const textArea = document.createElement('textarea')
+  textArea.value = content
+  textArea.setAttribute('readonly', '')
+  textArea.style.position = 'fixed'
+  textArea.style.left = '-9999px'
+  textArea.style.opacity = '0'
+  document.body.appendChild(textArea)
+  textArea.select()
+  textArea.setSelectionRange(0, content.length)
+
+  try {
+    if (!document.execCommand('copy')) throw new Error('copy command was rejected')
+  } finally {
+    textArea.remove()
+  }
+}
+
 async function copyMessageContent(message: Message) {
-  await window.navigator.clipboard.writeText(message.content || '')
+  const content = message.content || ''
+  if (!content) {
+    antMessage.warning('该消息没有可复制的正文')
+    return
+  }
+
+  try {
+    await writeClipboardText(content)
+    antMessage.success('正文已复制')
+  } catch (err) {
+    console.warn('copy message content failed', err)
+    antMessage.error('复制失败，请手动复制')
+  }
 }
 
 async function openMessageDetails(message: Message) {

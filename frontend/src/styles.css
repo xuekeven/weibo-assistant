@@ -2814,6 +2814,13 @@ select:focus-visible,
   box-shadow: -18px 0 42px rgba(28, 35, 41, 0.18);
 }
 
+.message-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  background: rgba(24, 33, 41, 0.16);
+}
+
 .detail-pane-head {
   flex: 0 0 auto;
 }
