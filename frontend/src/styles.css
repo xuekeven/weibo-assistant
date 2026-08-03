@@ -598,6 +598,20 @@ h2 {
   cursor: default;
 }
 
+.image-item.pending.running {
+  border-color: #b7c9d4;
+  background: #edf3f6;
+}
+
+.image-item.pending.failed {
+  border-color: #e0b8b8;
+  background: #fff5f4;
+}
+
+.image-item.pending.failed strong {
+  color: #9c3636;
+}
+
 .image-item.pending strong {
   color: #33414c;
   font-size: 12px;
@@ -613,6 +627,32 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
   word-break: break-all;
+}
+
+.media-retry-button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  margin-left: 8px;
+  padding: 0;
+  place-items: center;
+  flex: 0 0 24px;
+  border: 1px solid #d4a6a6;
+  border-radius: 6px;
+  background: #fff;
+  color: #9c3636;
+  cursor: pointer;
+}
+
+.media-retry-button:hover:not(:disabled),
+.media-retry-button:focus-visible:not(:disabled) {
+  border-color: #b55757;
+  color: #752525;
+}
+
+.media-retry-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .timeline-mark {

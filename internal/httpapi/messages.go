@@ -164,7 +164,15 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResolveMessageMedia(w http.ResponseWriter, r *http.Request) {
-	id, err := pathInt64(r, "/api/messages/", "/resolve-media")
+	s.handleQueueMessageMedia(w, r, "/resolve-media", false)
+}
+
+func (s *Server) handleRetryMessageMedia(w http.ResponseWriter, r *http.Request) {
+	s.handleQueueMessageMedia(w, r, "/retry-media", true)
+}
+
+func (s *Server) handleQueueMessageMedia(w http.ResponseWriter, r *http.Request, suffix string, retryFailed bool) {
+	id, err := pathInt64(r, "/api/messages/", suffix)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -177,7 +185,12 @@ func (s *Server) handleResolveMessageMedia(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	queued, err := s.store.EnqueueMediaResolutionForMessage(r.Context(), id)
+	var queued int64
+	if retryFailed {
+		queued, err = s.store.RetryMediaResolutionForMessage(r.Context(), id)
+	} else {
+		queued, err = s.store.EnqueueMediaResolutionForMessage(r.Context(), id)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

@@ -28,6 +28,7 @@ import {
   listNotificationRules,
   listUsers,
   retryNotificationOutbox,
+  retryMessageMedia,
   resolveMessageMedia,
   updateNotificationRule,
   type Group,
@@ -93,7 +94,7 @@ const newMessageCount = ref(0)
 const autoFollowMessages = ref(true)
 const messageListRef = ref<HTMLElement | null>(null)
 const currentTime = ref(new Date())
-const mediaResolutionRequests = new Set<number>()
+const mediaResolutionRequests = ref(new Set<number>())
 const messageRequests = createLatestRequestGate()
 const olderMessageRequests = createLatestRequestGate()
 const historyRequests = createLatestRequestGate()
@@ -525,9 +526,6 @@ function sanitizeGroup(group: Group): Group {
 }
 
 function upsertMessage(message: Message) {
-  if (!messageHasUnresolvedImage(message)) {
-    mediaResolutionRequests.delete(message.id)
-  }
   const index = messages.value.findIndex((item) => item.id === message.id)
   if (!isDisplayableMessage(message)) {
     if (index >= 0) messages.value.splice(index, 1)
@@ -562,24 +560,53 @@ function upsertMessage(message: Message) {
   }
 }
 
-function messageHasUnresolvedImage(message: Message) {
+function messageNeedsInitialMediaResolution(message: Message) {
   return (message.attachments || []).some((attachment) =>
     attachment.attachmentType === 'image' &&
     !(attachment.url || '').trim() &&
+    !attachment.mediaResolution &&
     Array.isArray(attachment.meta?.fids) &&
     attachment.meta.fids.length > 0
   )
 }
 
 async function requestMessageMediaResolution(message: Message) {
-  if (!monitorIsFresh.value || !messageHasUnresolvedImage(message) || mediaResolutionRequests.has(message.id)) return
-  mediaResolutionRequests.add(message.id)
+  if (!monitorIsFresh.value || !messageNeedsInitialMediaResolution(message) || mediaResolutionRequests.value.has(message.id)) return
+  setMediaResolutionBusy(message.id, true)
   try {
     await resolveMessageMedia(message.id)
+    await refreshMessageMediaState(message.id)
   } catch (err) {
-    mediaResolutionRequests.delete(message.id)
     console.warn('request media resolution failed', err)
+  } finally {
+    setMediaResolutionBusy(message.id, false)
   }
+}
+
+async function retryFailedMessageMedia(message: Message) {
+  if (!monitorIsFresh.value || mediaResolutionRequests.value.has(message.id)) return
+  setMediaResolutionBusy(message.id, true)
+  try {
+    await retryMessageMedia(message.id)
+    await refreshMessageMediaState(message.id)
+  } catch (err) {
+    console.warn('retry media resolution failed', err)
+  } finally {
+    setMediaResolutionBusy(message.id, false)
+  }
+}
+
+function setMediaResolutionBusy(messageId: number, busy: boolean) {
+  const next = new Set(mediaResolutionRequests.value)
+  if (busy) next.add(messageId)
+  else next.delete(messageId)
+  mediaResolutionRequests.value = next
+}
+
+async function refreshMessageMediaState(messageId: number) {
+  const message = await getMessage(messageId)
+  const index = messages.value.findIndex((item) => item.id === messageId)
+  if (index >= 0) messages.value.splice(index, 1, message)
 }
 
 function updateGroupFromMessage(message: Message) {
@@ -1134,11 +1161,13 @@ onUnmounted(() => {
             :message="message"
             :query="query"
             :can-resolve-media="monitorIsFresh"
+            :media-resolution-busy="mediaResolutionRequests.has(message.id)"
             :is-own="Boolean(appConfig.currentUserId) && message.weiboSenderId === appConfig.currentUserId"
             @details="openMessageDetails"
             @preview="previewImageURL = $event"
             @media-loaded="handleMessageMediaLoaded"
             @resolve-media="requestMessageMediaResolution"
+            @retry-media="retryFailedMessageMedia"
           />
 
           <div v-if="!messagesLoading && orderedMessages.length === 0" class="empty-state">

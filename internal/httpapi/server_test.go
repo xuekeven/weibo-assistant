@@ -53,6 +53,7 @@ func TestStrictRequestValidation(t *testing.T) {
 		{name: "invalid retry job id", method: http.MethodPost, path: "/api/notification-outbox/not-a-number/retry"},
 		{name: "invalid message detail id", method: http.MethodGet, path: "/api/messages/not-a-number"},
 		{name: "invalid media resolution message id", method: http.MethodPost, path: "/api/messages/not-a-number/resolve-media"},
+		{name: "invalid media retry message id", method: http.MethodPost, path: "/api/messages/not-a-number/retry-media"},
 		{name: "missing daily stats range", method: http.MethodGet, path: "/api/groups/3/message-stats"},
 		{name: "unordered daily stats range", method: http.MethodGet, path: "/api/groups/3/message-stats?yesterdayStart=2026-07-22T00%3A00%3A00Z&todayStart=2026-07-21T00%3A00%3A00Z&tomorrowStart=2026-07-23T00%3A00%3A00Z"},
 		{name: "missing message export range", method: http.MethodGet, path: "/api/groups/3/messages/export"},

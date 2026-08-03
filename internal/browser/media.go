@@ -70,9 +70,15 @@ func FetchImageThumbnailURL(ctx context.Context, webSocketDebuggerURL string, fi
 		return "", "", err
 	}
 	defer client.Close()
+	if err := client.call(ctx, "Network.enable", map[string]any{}, nil); err != nil {
+		return "", requestURL, fmt.Errorf("enable network diagnostics: %w", err)
+	}
 
 	var metadata imageMetadataResponse
 	if err := client.evaluatePromise(ctx, expression, &metadata); err != nil {
+		if responseErr := imageMetadataNetworkError(ctx, client, requestURL); responseErr != nil {
+			return "", requestURL, fmt.Errorf("fetch image metadata for fid %s: %w", fid, responseErr)
+		}
 		return "", requestURL, fmt.Errorf("fetch image metadata for fid %s: %w", fid, err)
 	}
 	if metadata.Error != "" {
@@ -83,6 +89,44 @@ func FetchImageThumbnailURL(ctx context.Context, webSocketDebuggerURL string, fi
 		return "", requestURL, fmt.Errorf("weibo image metadata for fid %s has no thumbnail_240", fid)
 	}
 	return thumbnail, requestURL, nil
+}
+
+func imageMetadataNetworkError(ctx context.Context, client *cdpClient, requestURL string) error {
+	var response struct {
+		RequestID string `json:"requestId"`
+		Response  struct {
+			URL        string `json:"url"`
+			Status     int    `json:"status"`
+			StatusText string `json:"statusText"`
+		} `json:"response"`
+	}
+	for index := len(client.pending) - 1; index >= 0; index-- {
+		envelope := client.pending[index]
+		if envelope.Method != "Network.responseReceived" || json.Unmarshal(envelope.Params, &response) != nil {
+			continue
+		}
+		if response.Response.URL != requestURL {
+			continue
+		}
+		body, _ := getNetworkResponseBody(ctx, client, response.RequestID)
+		return newImageMetadataHTTPError(response.Response.Status, response.Response.StatusText, body)
+	}
+	return nil
+}
+
+func newImageMetadataHTTPError(status int, statusText string, body string) error {
+	var payload imageMetadataResponse
+	if json.Unmarshal([]byte(strings.TrimSpace(body)), &payload) == nil && payload.Error != "" {
+		if payload.ErrorCode != 0 {
+			return fmt.Errorf("weibo image metadata returned HTTP %d (error %d): %s", status, payload.ErrorCode, payload.Error)
+		}
+		return fmt.Errorf("weibo image metadata returned HTTP %d: %s", status, payload.Error)
+	}
+	statusText = strings.TrimSpace(statusText)
+	if statusText != "" {
+		return fmt.Errorf("weibo image metadata returned HTTP %d %s", status, statusText)
+	}
+	return fmt.Errorf("weibo image metadata returned HTTP %d", status)
 }
 
 func imageMetadataRequestURL(fid string, callback string) string {

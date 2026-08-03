@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ReloadOutlined } from '@ant-design/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { avatarDisplayURL, type Attachment, type Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
@@ -7,6 +8,7 @@ const props = defineProps<{
   message: Message
   query: string
   canResolveMedia: boolean
+  mediaResolutionBusy: boolean
   isOwn: boolean
 }>()
 
@@ -15,15 +17,15 @@ const emit = defineEmits<{
   preview: [url: string]
   mediaLoaded: []
   resolveMedia: [message: Message]
+  retryMedia: [message: Message]
 }>()
 
 const imageAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'image'))
 const videoAttachments = computed(() => (props.message.attachments || []).filter((attachment) => attachment.attachmentType === 'video'))
 const isVideoMessage = computed(() => props.message.messageType === 'video' || videoAttachments.value.length > 0)
 const parts = computed(() => messageContentParts(props.message.content))
-const fids = computed(() => imageAttachments.value.flatMap(attachmentFids).filter(Boolean))
-const unresolvedImageFIDs = computed(() => imageAttachments.value
-  .filter((attachment) => !(attachment.url || '').trim())
+const unqueuedImageFIDs = computed(() => imageAttachments.value
+  .filter((attachment) => !(attachment.url || '').trim() && !attachment.mediaResolution)
   .flatMap(attachmentFids)
   .filter(Boolean))
 const failedAvatarURL = ref('')
@@ -99,10 +101,28 @@ function markImageFailed(attachment: Attachment) {
   failedImageURLs.value = { ...failedImageURLs.value, [imageKey(attachment)]: true }
 }
 
+function mediaResolutionLabel(attachment: Attachment) {
+  switch (attachment.mediaResolution?.status) {
+    case 'pending': return '图片排队解析'
+    case 'running': return '图片解析中'
+    case 'failed': return '图片解析失败'
+    default: return '图片待解析'
+  }
+}
+
+function mediaResolutionHint(attachment: Attachment) {
+  const resolution = attachment.mediaResolution
+  if (!resolution) return '等待 monitor 创建解析任务'
+  const attempts = resolution.maxAttempts > 0 ? `已尝试 ${resolution.attemptCount}/${resolution.maxAttempts} 次` : ''
+  if (resolution.status === 'failed') return `${attempts}；微博图片接口暂时无法访问`
+  if (resolution.status === 'pending' && resolution.attemptCount > 0) return `${attempts}；等待再次解析`
+  return attempts || mediaResolutionLabel(attachment)
+}
+
 watch(
-  [() => props.canResolveMedia, () => props.message.id, () => unresolvedImageFIDs.value.join(',')],
+  [() => props.canResolveMedia, () => props.message.id, () => unqueuedImageFIDs.value.join(',')],
   ([canResolve]) => {
-    if (canResolve && unresolvedImageFIDs.value.length > 0) {
+    if (canResolve && unqueuedImageFIDs.value.length > 0) {
       emit('resolveMedia', props.message)
     }
   },
@@ -158,7 +178,24 @@ watch(
               />
               <span v-if="failedImageURLs[imageKey(attachment)]" class="image-fallback">图片加载失败</span>
             </button>
-            <span v-else class="image-item pending"><strong>图片待解析</strong><small v-if="fids.length > 0">fid {{ fids.join(', ') }}</small></span>
+            <span
+              v-else
+              class="image-item pending"
+              :class="{ failed: attachment.mediaResolution?.status === 'failed', running: attachment.mediaResolution?.status === 'running' }"
+              :title="mediaResolutionHint(attachment)"
+            >
+              <strong>{{ mediaResolutionLabel(attachment) }}</strong>
+              <small v-if="attachmentFids(attachment).length > 0">fid {{ attachmentFids(attachment).join(', ') }}</small>
+              <button
+                v-if="attachment.mediaResolution?.status === 'failed'"
+                class="media-retry-button"
+                type="button"
+                aria-label="重新解析图片"
+                :title="canResolveMedia ? '重新解析图片' : 'monitor 离线，暂时无法重试'"
+                :disabled="!canResolveMedia || mediaResolutionBusy"
+                @click="$emit('retryMedia', message)"
+              ><ReloadOutlined :spin="mediaResolutionBusy" /></button>
+            </span>
           </template>
         </div>
         <p v-if="!message.content && imageAttachments.length === 0">[{{ message.messageType }}]</p>

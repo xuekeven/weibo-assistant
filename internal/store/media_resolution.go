@@ -20,10 +20,19 @@ type MediaResolutionJob struct {
 	LastError     string
 }
 
-// EnqueueMediaResolutionForMessage creates one durable job for every unresolved
-// image fid on the message. The partial unique index makes repeated frontend
-// renders idempotent while still allowing a failed job to be requested again.
+// EnqueueMediaResolutionForMessage creates the first durable job for each
+// unresolved image fid. Terminal jobs are only retried by an explicit request.
 func (s *Store) EnqueueMediaResolutionForMessage(ctx context.Context, messageID int64) (int64, error) {
+	return s.enqueueMediaResolutionForMessage(ctx, messageID, false)
+}
+
+// RetryMediaResolutionForMessage creates a fresh job for unresolved fids whose
+// latest attempt has failed.
+func (s *Store) RetryMediaResolutionForMessage(ctx context.Context, messageID int64) (int64, error) {
+	return s.enqueueMediaResolutionForMessage(ctx, messageID, true)
+}
+
+func (s *Store) enqueueMediaResolutionForMessage(ctx context.Context, messageID int64, retryFailed bool) (int64, error) {
 	command, err := s.pool.Exec(ctx, `
 		insert into media_resolution_jobs (message_id, attachment_id, fid)
 		select attachment.message_id, attachment.id, btrim(fid.value)
@@ -39,12 +48,35 @@ func (s *Store) EnqueueMediaResolutionForMessage(ctx context.Context, messageID 
 		   and attachment.attachment_type = 'image'
 		   and coalesce(attachment.url, '') = ''
 		   and btrim(fid.value) <> ''
+		   and (
+		         not exists (
+		           select 1
+		             from media_resolution_jobs previous
+		            where previous.attachment_id = attachment.id
+		              and previous.fid = btrim(fid.value)
+		         )
+		         or (
+		           $2
+		           and (
+		             select previous.status
+		               from media_resolution_jobs previous
+		              where previous.attachment_id = attachment.id
+		                and previous.fid = btrim(fid.value)
+		              order by previous.created_at desc, previous.id desc
+		              limit 1
+		           ) = 'failed'
+		         )
+		       )
 		on conflict (attachment_id, fid) where status in ('pending', 'running') do nothing
-	`, messageID)
+	`, messageID, retryFailed)
 	if err != nil {
 		return 0, err
 	}
-	return command.RowsAffected(), nil
+	queued := command.RowsAffected()
+	if queued > 0 {
+		s.notifyRealtimeBestEffort(ctx, RealtimeEvent{Type: "message_updated", MessageID: messageID})
+	}
+	return queued, nil
 }
 
 func (s *Store) ClaimMediaResolution(ctx context.Context, staleAfter time.Duration) (MediaResolutionJob, error) {
@@ -110,6 +142,7 @@ func (s *Store) FailMediaResolution(ctx context.Context, job MediaResolutionJob,
 	if command.RowsAffected() != 1 {
 		return pgx.ErrNoRows
 	}
+	s.notifyRealtimeBestEffort(ctx, RealtimeEvent{Type: "message_updated", MessageID: job.MessageID})
 	return nil
 }
 

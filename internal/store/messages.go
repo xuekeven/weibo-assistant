@@ -46,13 +46,22 @@ type User struct {
 }
 
 type Attachment struct {
-	ID             int64           `json:"id,omitempty"`
-	MessageID      int64           `json:"messageId,omitempty"`
-	AttachmentType string          `json:"attachmentType"`
-	URL            string          `json:"url,omitempty"`
-	LocalPath      string          `json:"localPath,omitempty"`
-	Meta           json.RawMessage `json:"meta,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt,omitempty"`
+	ID              int64                 `json:"id,omitempty"`
+	MessageID       int64                 `json:"messageId,omitempty"`
+	AttachmentType  string                `json:"attachmentType"`
+	URL             string                `json:"url,omitempty"`
+	LocalPath       string                `json:"localPath,omitempty"`
+	Meta            json.RawMessage       `json:"meta,omitempty"`
+	MediaResolution *MediaResolutionState `json:"mediaResolution,omitempty"`
+	CreatedAt       time.Time             `json:"createdAt,omitempty"`
+}
+
+type MediaResolutionState struct {
+	Status       string    `json:"status"`
+	AttemptCount int       `json:"attemptCount"`
+	MaxAttempts  int       `json:"maxAttempts"`
+	LastError    string    `json:"lastError,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Message struct {
@@ -911,16 +920,43 @@ func attachmentsByMessageID(ctx context.Context, db messageDB, ids []int64) (map
 		return result, nil
 	}
 	rows, err := db.Query(ctx, `
-		select id,
-		       message_id,
-		       attachment_type,
-		       coalesce(url, ''),
-		       coalesce(local_path, ''),
-		       coalesce(meta, 'null'::jsonb),
-		       created_at
-		  from weibo_message_attachments
-		 where message_id = any($1)
-		 order by id asc
+		select attachment.id,
+		       attachment.message_id,
+		       attachment.attachment_type,
+		       coalesce(attachment.url, ''),
+		       coalesce(attachment.local_path, ''),
+		       coalesce(attachment.meta, 'null'::jsonb),
+		       attachment.created_at,
+		       coalesce(resolution.status, ''),
+		       coalesce(resolution.attempt_count, 0),
+		       coalesce(resolution.max_attempts, 0),
+		       coalesce(resolution.last_error, ''),
+		       coalesce(resolution.updated_at, 'epoch'::timestamptz)
+		  from weibo_message_attachments attachment
+		  left join lateral (
+		    select case
+		             when count(*) = 0 then ''
+		             when bool_or(latest.status = 'running') then 'running'
+		             when bool_or(latest.status = 'pending') then 'pending'
+		             when bool_or(latest.status = 'failed') then 'failed'
+		             else 'completed'
+		           end as status,
+		           max(latest.attempt_count) as attempt_count,
+		           max(latest.max_attempts) as max_attempts,
+		           (array_agg(latest.last_error order by latest.updated_at desc, latest.id desc)
+		             filter (where nullif(latest.last_error, '') is not null))[1] as last_error,
+		           max(latest.updated_at) as updated_at
+		      from (
+		        select distinct on (job.fid)
+		               job.id, job.status, job.attempt_count, job.max_attempts,
+		               coalesce(job.last_error, '') as last_error, job.updated_at
+		          from media_resolution_jobs job
+		         where job.attachment_id = attachment.id
+		         order by job.fid, job.created_at desc, job.id desc
+		      ) latest
+		  ) resolution on true
+		 where attachment.message_id = any($1)
+		 order by attachment.id asc
 	`, ids)
 	if err != nil {
 		return nil, err
@@ -929,6 +965,7 @@ func attachmentsByMessageID(ctx context.Context, db messageDB, ids []int64) (map
 
 	for rows.Next() {
 		var attachment Attachment
+		var resolution MediaResolutionState
 		if err := rows.Scan(
 			&attachment.ID,
 			&attachment.MessageID,
@@ -937,8 +974,16 @@ func attachmentsByMessageID(ctx context.Context, db messageDB, ids []int64) (map
 			&attachment.LocalPath,
 			&attachment.Meta,
 			&attachment.CreatedAt,
+			&resolution.Status,
+			&resolution.AttemptCount,
+			&resolution.MaxAttempts,
+			&resolution.LastError,
+			&resolution.UpdatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if resolution.Status != "" {
+			attachment.MediaResolution = &resolution
 		}
 		if isUnresolvedLegacyThumbnail(attachment) {
 			attachment.URL = ""

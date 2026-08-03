@@ -63,6 +63,13 @@ export type Attachment = {
   url?: string
   localPath?: string
   meta?: Record<string, unknown> | null
+  mediaResolution?: {
+    status: 'pending' | 'running' | 'completed' | 'failed'
+    attemptCount: number
+    maxAttempts: number
+    lastError?: string
+    updatedAt: string
+  }
   createdAt?: string
 }
 
@@ -286,6 +293,12 @@ export function getMessage(id: number, includeRaw = false) {
 
 export function resolveMessageMedia(id: number) {
   return request<{ messageId: number; queued: number }>(`/api/messages/${id}/resolve-media`, {
+    method: 'POST'
+  })
+}
+
+export function retryMessageMedia(id: number) {
+  return request<{ messageId: number; queued: number }>(`/api/messages/${id}/retry-media`, {
     method: 'POST'
   })
 }

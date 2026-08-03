@@ -37,3 +37,17 @@ func TestImageMetadataCallbackName(t *testing.T) {
 		t.Fatalf("unexpected callback names: %q %q", first, second)
 	}
 }
+
+func TestNewImageMetadataHTTPErrorIncludesWeiboError(t *testing.T) {
+	err := newImageMetadataHTTPError(403, "Forbidden", `{"error":"auth failed! auth by Null spi!","error_code":40302}`)
+	if got := err.Error(); got != "weibo image metadata returned HTTP 403 (error 40302): auth failed! auth by Null spi!" {
+		t.Fatalf("unexpected error: %s", got)
+	}
+}
+
+func TestNewImageMetadataHTTPErrorFallsBackToStatus(t *testing.T) {
+	err := newImageMetadataHTTPError(503, "Service Unavailable", "not json")
+	if got := err.Error(); got != "weibo image metadata returned HTTP 503 Service Unavailable" {
+		t.Fatalf("unexpected error: %s", got)
+	}
+}

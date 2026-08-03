@@ -70,21 +70,33 @@ func resolveImageFID(ctx context.Context, st *store.Store, imageURLByFID *imageU
 	if fid == "" {
 		return 0, nil
 	}
+	if imageURL, ok := imageURLByFID.Get(fid); ok {
+		count, err := persistResolvedImageFID(ctx, st, fid, imageURL, imageURL)
+		if err != nil {
+			return 0, err
+		}
+		slog.Info("image attachment resolved from captured page resource", "fid", fid, "resource", mediaURLLogValue(imageURL), "updated", count)
+		return count, nil
+	}
 
 	imageURL, sourceURL, err := browser.FetchImageThumbnailURL(ctx, targetURL, fid)
 	if err != nil {
 		return 0, err
 	}
 	imageURLByFID.Set(fid, imageURL)
-	count, err := st.ResolveImageAttachmentURL(ctx, store.ResolveImageAttachmentParams{
-		FID:       fid,
-		URL:       imageURL,
-		SourceURL: sourceURL,
-		Force:     true,
-	})
+	count, err := persistResolvedImageFID(ctx, st, fid, imageURL, sourceURL)
 	if err != nil {
 		return 0, err
 	}
 	slog.Info("image attachment resolved from metadata", "fid", fid, "resource", mediaURLLogValue(imageURL), "updated", count)
 	return count, nil
+}
+
+func persistResolvedImageFID(ctx context.Context, st *store.Store, fid string, imageURL string, sourceURL string) (int64, error) {
+	return st.ResolveImageAttachmentURL(ctx, store.ResolveImageAttachmentParams{
+		FID:       fid,
+		URL:       imageURL,
+		SourceURL: sourceURL,
+		Force:     true,
+	})
 }
