@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ReloadOutlined } from '@ant-design/icons-vue'
+import { BellOutlined, CopyOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { avatarDisplayURL, type Attachment, type Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
@@ -14,6 +14,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   details: [message: Message]
+  copy: [message: Message]
+  filterSender: [message: Message]
+  createRule: [message: Message]
   preview: [url: string]
   mediaLoaded: []
   resolveMedia: [message: Message]
@@ -143,6 +146,9 @@ watch(
         <time :title="formatTime(message.sentAt || message.capturedAt)">{{ formatTime(message.sentAt || message.capturedAt, { seconds: false }) }}</time>
         <span class="message-actions">
           <button class="message-secondary-action" type="button" @click="$emit('details', message)">详情</button>
+          <button class="message-secondary-action" type="button" @click="$emit('copy', message)"><CopyOutlined />复制正文</button>
+          <button class="message-secondary-action" type="button" @click="$emit('filterSender', message)"><UserOutlined />只看此人</button>
+          <button class="message-secondary-action" type="button" @click="$emit('createRule', message)"><BellOutlined />创建通知规则</button>
         </span>
       </div>
       <div class="bubble" :class="{ media: imageAttachments.length > 0 || isVideoMessage, recalled: message.messageType === 'recall' }">

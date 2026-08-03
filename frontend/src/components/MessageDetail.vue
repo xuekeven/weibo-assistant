@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { BellOutlined, CloseOutlined, CopyOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { CloseOutlined } from '@ant-design/icons-vue'
 import type { Message, NotificationEvent } from '../api'
 import { formatTime, notificationLabel } from '../utils/presentation'
 
 defineProps<{ message: Message; events: NotificationEvent[] }>()
-defineEmits<{ close: []; copy: []; filterSender: []; createRule: [] }>()
+defineEmits<{ close: [] }>()
 </script>
 
 <template>
@@ -12,11 +12,6 @@ defineEmits<{ close: []; copy: []; filterSender: []; createRule: [] }>()
     <div class="pane-head detail-pane-head">
       <div><h2>消息详情</h2><p>消息 #{{ message.id }}</p></div>
       <a-button class="panel-close-button" aria-label="关闭消息详情" @click="$emit('close')"><CloseOutlined /></a-button>
-    </div>
-    <div class="detail-toolbar" aria-label="消息操作">
-      <a-button type="primary" @click="$emit('copy')"><CopyOutlined />复制正文</a-button>
-      <a-button @click="$emit('filterSender')"><UserOutlined />只看此人</a-button>
-      <a-button @click="$emit('createRule')"><BellOutlined />创建通知规则</a-button>
     </div>
     <div class="detail-content">
       <section class="detail-card detail-metadata">

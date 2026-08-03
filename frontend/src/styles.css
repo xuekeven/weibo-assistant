@@ -2070,7 +2070,8 @@ select:focus-visible,
 
 .message-actions {
   display: inline-flex;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   margin-left: 6px;
   opacity: 0;
   transition: opacity 120ms ease;
@@ -2094,12 +2095,19 @@ select:focus-visible,
 }
 
 .message-secondary-action {
+  display: inline-flex;
   height: 20px;
+  align-items: center;
+  gap: 4px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  background: transparent;
   color: #52616d;
   font-size: 10px;
+}
+
+.message-secondary-action .anticon {
+  font-size: 11px;
 }
 
 .message-secondary-action:hover,
@@ -2812,25 +2820,6 @@ select:focus-visible,
 
 .detail-pane-head h2 {
   font-size: 18px;
-}
-
-.detail-toolbar {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.35fr;
-  flex: 0 0 auto;
-  gap: 8px;
-  padding: 12px 16px;
-  border-bottom: 1px solid #e1e6e9;
-  background: #fff;
-}
-
-.detail-toolbar .ant-btn {
-  min-width: 0;
-  height: 36px;
-  padding-inline: 8px;
-  border-radius: 8px;
-  font-size: 12px;
-  box-shadow: none;
 }
 
 .detail-content {

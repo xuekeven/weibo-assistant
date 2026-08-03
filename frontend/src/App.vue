@@ -1164,6 +1164,9 @@ onUnmounted(() => {
             :media-resolution-busy="mediaResolutionRequests.has(message.id)"
             :is-own="Boolean(appConfig.currentUserId) && message.weiboSenderId === appConfig.currentUserId"
             @details="openMessageDetails"
+            @copy="copyMessageContent"
+            @filter-sender="filterByMessageSender"
+            @create-rule="startRuleFromMessage"
             @preview="previewImageURL = $event"
             @media-loaded="handleMessageMediaLoaded"
             @resolve-media="requestMessageMediaResolution"
@@ -1241,9 +1244,6 @@ onUnmounted(() => {
       :message="selectedMessage"
       :events="selectedMessageNotifications"
       @close="selectedMessage = null"
-      @copy="copyMessageContent(selectedMessage)"
-      @filter-sender="filterByMessageSender(selectedMessage)"
-      @create-rule="startRuleFromMessage(selectedMessage)"
     />
 
     <div v-if="previewImageURL" class="image-preview" role="dialog" aria-modal="true" aria-label="图片预览" @click="previewImageURL = ''">
