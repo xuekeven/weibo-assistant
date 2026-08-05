@@ -206,7 +206,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			opts.OnPageTarget(target.WebSocketDebuggerURL)
 		}
 	}
-	slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
+	logMonitorHeartbeat(probe)
 	if opts.OnProbe != nil {
 		if err := opts.OnProbe(ctx, probe); err != nil {
 			slog.Warn("update monitor status failed", "error", err)
@@ -348,7 +348,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 					}
 				}
 			}
-			slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
+			logMonitorHeartbeat(probe)
 			if opts.OnProbe != nil {
 				if err := opts.OnProbe(ctx, probe); err != nil {
 					slog.Warn("update monitor status failed", "error", err)
@@ -574,8 +574,16 @@ func waitForAuthenticatedChatPage(ctx context.Context, opts MonitorOptions) (chr
 	}
 }
 
+func logMonitorHeartbeat(probe PageProbe) {
+	if probe.Status == "network_listening" && strings.TrimSpace(probe.Error) == "" {
+		slog.Debug("微博实时监听正常", "页面", networkURLLogValue(probe.URL))
+		return
+	}
+	slog.Info("微博监听状态更新", "状态", probe.Status, "页面", networkURLLogValue(probe.URL), "错误", clipLogText(probe.Error, 500))
+}
+
 func reportPageProbe(ctx context.Context, opts MonitorOptions, probe PageProbe) {
-	slog.Info("monitor heartbeat", "status", probe.Status, "url", networkURLLogValue(probe.URL), "error", clipLogText(probe.Error, 500))
+	logMonitorHeartbeat(probe)
 	if opts.OnProbe == nil {
 		return
 	}
@@ -1235,7 +1243,7 @@ func monitorNetworkEvents(
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
-				slog.Info("network websocket created", "requestID", params.RequestID, "url", networkURLLogValue(params.URL))
+				slog.Info("network websocket created", "请求ID", params.RequestID, "url", networkURLLogValue(params.URL))
 				if onWebSocketState != nil && len(activeWebSockets) == 1 {
 					onWebSocketState(true, wasDisconnected)
 				}
@@ -1285,13 +1293,12 @@ func monitorNetworkEvents(
 					)
 					slog.Debug("network recall content", "content", clipLogText(message.Content, 240))
 				} else {
-					slog.Info("network message parsed",
-						"weiboMessageID", message.WeiboMessageID,
-						"groupID", message.GroupID,
-						"senderID", message.SenderID,
-						"type", message.MessageType,
-						"contentLength", len([]rune(message.Content)),
-						"contentSHA256", contentLogHash(message.Content),
+					slog.Info("已收到微博消息",
+						"微博消息ID", message.WeiboMessageID,
+						"微博群ID", message.GroupID,
+						"发送人ID", message.SenderID,
+						"消息类型", message.MessageType,
+						"正文长度", len([]rune(message.Content)),
 					)
 					slog.Debug("network message content", "weiboMessageID", message.WeiboMessageID, "content", clipLogText(message.Content, 240))
 				}
@@ -1340,11 +1347,11 @@ func monitorNetworkEvents(
 				onTrackedRequests(len(requests))
 			}
 			if looksLikeMessageURL(params.Response.URL) {
-				slog.Info("network response candidate",
+				slog.Debug("微博网络请求",
 					"requestID", params.RequestID,
-					"type", params.Type,
-					"status", params.Response.Status,
-					"mime", params.Response.MimeType,
+					"资源类型", params.Type,
+					"状态码", params.Response.Status,
+					"内容类型", params.Response.MimeType,
 					"url", networkURLLogValue(params.Response.URL),
 				)
 			}

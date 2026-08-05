@@ -255,12 +255,15 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			if err := st.MarkMonitorMessage(messageCtx); err != nil {
 				slog.Warn("update monitor last message time failed", "error", err)
 			}
-			slog.Info("network message persisted",
-				"created", result.Created,
-				"messageID", result.Message.ID,
-				"weiboMessageID", result.Message.WeiboMessageID,
-				"groupID", result.Message.GroupID,
-				"senderID", result.Message.WeiboSenderID,
+			logMessage := "重复消息已忽略"
+			if result.Created {
+				logMessage = "新消息已保存"
+			}
+			slog.Info(logMessage,
+				"数据库消息ID", result.Message.ID,
+				"微博消息ID", result.Message.WeiboMessageID,
+				"群聊ID", result.Message.GroupID,
+				"发送人ID", result.Message.WeiboSenderID,
 			)
 			if targetMatched && notification == nil && result.Created {
 				slog.Warn("target message matched but wework relay is not configured",

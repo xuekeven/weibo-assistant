@@ -383,10 +383,10 @@ curl -i http://127.0.0.1:6001/api/ws
 监控日志里重点看这些关键词：
 
 ```text
-monitor heartbeat
+微博监听状态更新
 network monitor enabled
-network message parsed
-network message persisted
+已收到微博消息
+新消息已保存
 target message wework notification sent
 ```
 
