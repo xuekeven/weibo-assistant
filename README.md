@@ -44,7 +44,7 @@
 - Go `1.26+`
 - PostgreSQL
 - Chrome 或 Chromium
-- Node.js 和 npm，仅用于构建或开发前端
+- Node.js 和 pnpm，仅用于构建或开发前端
 - Linux 生产环境：systemd `240+`、logrotate；显示微博 HEIC 图片还需 `libheif-examples`
 - 企业微信消息中转服务，用于消息提醒和登录二维码通知
 
@@ -73,7 +73,7 @@ WEWORK_RELAY_TOUSER=
 2. 安装前端依赖并执行数据库迁移：
 
 ```bash
-npm --prefix frontend install
+pnpm --dir frontend install
 go run ./cmd/weibo-assistant migrate
 ```
 
@@ -82,7 +82,7 @@ go run ./cmd/weibo-assistant migrate
 ```bash
 go run ./cmd/weibo-assistant monitor
 go run ./cmd/weibo-assistant server
-npm --prefix frontend run dev
+pnpm --dir frontend run dev
 ```
 
 首次启动或登录失效时，monitor 会通过企业微信发送提示和二维码。使用微博 App 扫码后，monitor 会自动选择目标群并开始监听；登录态保存在 `WEIBO_PROFILE_DIR`，默认目录为 `.weibo-profile`。

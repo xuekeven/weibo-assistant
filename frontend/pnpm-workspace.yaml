@@ -1,0 +1,10 @@
+overrides:
+  "@vue/compiler-core": 3.5.39
+  "@vue/compiler-dom": 3.5.39
+  "@vue/shared": 3.5.39
+
+allowBuilds:
+  esbuild: true
+  core-js: false
+
+saveExact: true
