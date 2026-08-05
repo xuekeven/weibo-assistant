@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { BellOutlined, CopyOutlined, FileTextOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons-vue'
 import { computed, ref, watch } from 'vue'
-import { avatarDisplayURL, type Attachment, type Message } from '../api'
+import { avatarDisplayURL, imageDisplayURL, type Attachment, type Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
 
 const props = defineProps<{
@@ -90,7 +90,7 @@ function imagePreviewURL(attachment: Attachment) {
     previewURL.searchParams.set('source', url.searchParams.get('source') || '209678993')
     previewURL.searchParams.set('imageType', url.searchParams.get('imageType') || 'origin')
     previewURL.searchParams.set('ts', String(Date.now()))
-    return previewURL.toString()
+    return imageDisplayURL(previewURL.toString())
   } catch {
     return rawURL
   }
@@ -175,7 +175,7 @@ watch(
           <template v-for="attachment in imageAttachments" :key="attachment.id || attachment.url || JSON.stringify(attachment.meta)">
             <button v-if="attachment.url" class="image-item" type="button" title="预览图片" @click="$emit('preview', imagePreviewURL(attachment))">
               <img
-                :src="attachment.url"
+                :src="imageDisplayURL(attachment.url)"
                 alt="微博图片消息"
                 loading="lazy"
                 referrerpolicy="no-referrer"

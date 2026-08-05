@@ -16,7 +16,7 @@
 ## 主要功能
 
 - 持久化微博登录态；登录失效时通过企业微信发送登录二维码，扫码后自动恢复监听。
-- 实时解析群聊文本和图片消息，补全图片地址并统一入库。
+- 实时解析群聊文本和图片消息，补全图片地址并统一入库；受保护图片由后端使用微博登录态代理，HEIC 自动转换为 JPEG。
 - 启动补偿、断线补漏和指定时间范围的历史消息回溯。
 - 数据库唯一键去重，避免实时监听与历史同步产生重复消息和通知。
 - 按群聊、发送人、消息类型和关键词配置通知规则；关键词使用模糊匹配。
@@ -29,16 +29,15 @@
 ```text
 微博群聊页 -> monitor -> PostgreSQL -> 企业微信中转服务
                            |
-浏览器前端 <- frontend <- server API / WebSocket
+浏览器前端 <- server（静态页面、API、WebSocket、图片代理）
 ```
 
-生产环境运行三个长期进程，它们来自同一个 `weibo-assistant` 可执行文件：
+生产环境推荐运行两个长期进程，它们来自同一个 `weibo-assistant` 可执行文件：
 
 | 进程 | 职责 | 默认端口 |
 | --- | --- | --- |
-| `server` | API、浏览器 WebSocket、健康检查和指标 | `6001` |
+| `server` | Vue 静态页面、API、浏览器 WebSocket、图片代理、健康检查和指标 | `6001` |
 | `monitor` | Chrome 登录、消息监听、历史同步和通知投递 | 无 |
-| `frontend` | 托管 `frontend/dist` | `6002` |
 
 ## 环境要求
 
@@ -46,7 +45,7 @@
 - PostgreSQL
 - Chrome 或 Chromium
 - Node.js 和 npm，仅用于构建或开发前端
-- Linux 生产环境：systemd `240+`、logrotate
+- Linux 生产环境：systemd `240+`、logrotate；显示微博 HEIC 图片还需 `libheif-examples`
 - 企业微信消息中转服务，用于消息提醒和登录二维码通知
 
 ## 本地运行
@@ -78,7 +77,7 @@ npm --prefix frontend install
 go run ./cmd/weibo-assistant migrate
 ```
 
-3. 分别启动三个开发进程：
+3. 启动 monitor、统一 server；需要前端热更新时再启动 Vite：
 
 ```bash
 go run ./cmd/weibo-assistant monitor
@@ -99,8 +98,9 @@ monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关�
 | `APP_ENV` | 运行环境；`production` 会关闭开发消息接口 |
 | `DATABASE_URL` | PostgreSQL 连接串，必填 |
 | `BACKEND_BIND_ADDRESS` / `BACKEND_PORT` | API 监听地址和端口，默认 `0.0.0.0:6001` |
-| `FRONTEND_BIND_ADDRESS` / `FRONTEND_PORT` | 静态前端监听地址和端口，默认 `0.0.0.0:6002` |
-| `CORS_ALLOWED_ORIGINS` | 额外允许的完整 Origin，多个值使用逗号分隔 |
+| `FRONTEND_DIST_DIR` | server 托管的 Vue 构建目录，默认 `frontend/dist` |
+| `FRONTEND_PORT` | 本地开发兼容配置；统一生产部署设为 `6001` |
+| `CORS_ALLOWED_ORIGINS` | 允许访问 API 和 WebSocket 的完整 Origin，多个值使用逗号分隔 |
 | `WEIBO_PROFILE_DIR` | Chrome 登录态目录，默认 `.weibo-profile` |
 | `HEADLESS` | 是否无头运行 Chrome，服务器建议设为 `true` |
 | `CHROME_EXECUTABLE` | Chrome/Chromium 路径；留空时自动查找 |
@@ -113,7 +113,7 @@ monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关�
 | `LOGIN_QR_REFRESH_SECONDS` | 未登录时检查二维码的间隔，默认 `120` 秒 |
 | `LOG_LEVEL` | `debug`、`info`、`warn` 或 `error` |
 
-前后端默认监听 `0.0.0.0`。通过 Tailscale 使用时，可将两个 bind 地址改为本机的 `100.x` 地址并限制防火墙端口。API 当前没有应用层鉴权，不应直接暴露到公网。
+生产环境只有 server 对外监听 `BACKEND_BIND_ADDRESS:BACKEND_PORT`，前端静态文件与 API 共用该端口。通过反向代理部署时，`CORS_ALLOWED_ORIGINS` 必须包含页面的完整 Origin。API 当前没有应用层鉴权，不应直接暴露到公网。
 
 ## 消息补偿与回溯
 
@@ -142,8 +142,7 @@ cp .env.example .env
 
 sudo APP_DIR="$HOME/repos/weibo-assistant" \
   RUN_USER="$(id -un)" \
-  RUN_GROUP="$(id -gn)" \
-  INSTALL_FRONTEND=true \
+  RUN_GROUP="$(id -gn)" \ \
   ENABLE_NOW=true \
   ./scripts/install-systemd.sh
 ```
@@ -159,8 +158,7 @@ git pull
 ./scripts/build-linux.sh
 ./bin/weibo-assistant migrate
 sudo systemctl restart weibo-assistant-server.service \
-  weibo-assistant-monitor.service \
-  weibo-assistant-frontend.service
+  weibo-assistant-monitor.service
 ```
 
 查看状态和日志：
@@ -180,6 +178,7 @@ sudo systemctl restart weibo-assistant-server.service \
 | `GET /readyz` | 检查数据库和 monitor 心跳，异常时返回 `503` |
 | `GET /healthz` | 与 `/readyz` 相同的兼容入口 |
 | `GET /metrics` | Prometheus 指标 |
+| `GET /api/media/image` | 通过已登录微博会话代理聊天图片，HEIC 自动转换为 JPEG |
 | `GET /api/monitor/status` | monitor、登录态和最后消息状态 |
 | `GET /api/groups` | 群聊列表 |
 | `GET /api/messages` | 消息列表 |

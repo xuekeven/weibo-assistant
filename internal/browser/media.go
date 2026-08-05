@@ -7,9 +7,109 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 )
+
+// FetchAuthenticatedImage downloads a protected Weibo image using cookies from the logged-in chat tab.
+func FetchAuthenticatedImage(ctx context.Context, debugPort int, rawURL string, maxBytes int64) ([]byte, string, error) {
+	target, _ := getCurrentPageProbe(ctx, debugPort)
+	if target.WebSocketDebuggerURL == "" {
+		return nil, "", errors.New("logged-in Weibo chat page is unavailable")
+	}
+	client, err := newCDPClient(ctx, target.WebSocketDebuggerURL)
+	if err != nil {
+		return nil, "", err
+	}
+	defer client.Close()
+	var result struct {
+		Cookies []struct {
+			Name  string
+			Value string
+		}
+	}
+	if err := client.call(ctx, "Network.getCookies", map[string]any{"urls": []string{rawURL}}, &result); err != nil {
+		return nil, "", fmt.Errorf("read Weibo cookies: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, cookie := range result.Cookies {
+		req.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+	}
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", "https://api.weibo.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("Weibo image returned HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, "", errors.New("Weibo image is too large")
+	}
+	contentType := http.DetectContentType(data)
+	if isHEIC(data) {
+		data, err = convertHEICToJPEG(ctx, data, maxBytes)
+		if err != nil {
+			return nil, "", err
+		}
+		contentType = "image/jpeg"
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, "", errors.New("Weibo response is not an image")
+	}
+	return data, contentType, nil
+}
+
+func isHEIC(data []byte) bool {
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return false
+	}
+	brand := string(data[8:12])
+	return brand == "heic" || brand == "heix" || brand == "hevc" || brand == "hevx" || brand == "mif1"
+}
+
+func convertHEICToJPEG(ctx context.Context, data []byte, maxBytes int64) ([]byte, error) {
+	input, err := os.CreateTemp("", "weibo-image-*.heic")
+	if err != nil {
+		return nil, fmt.Errorf("create HEIC input: %w", err)
+	}
+	inputPath := input.Name()
+	outputPath := inputPath + ".jpg"
+	defer os.Remove(inputPath)
+	defer os.Remove(outputPath)
+	if _, err := input.Write(data); err != nil {
+		input.Close()
+		return nil, fmt.Errorf("write HEIC input: %w", err)
+	}
+	if err := input.Close(); err != nil {
+		return nil, fmt.Errorf("close HEIC input: %w", err)
+	}
+	if output, err := exec.CommandContext(ctx, "heif-convert", "-q", "88", inputPath, outputPath).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("convert HEIC: %w: %.256s", err, strings.TrimSpace(string(output)))
+	}
+	converted, err := os.ReadFile(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("read converted image: %w", err)
+	}
+	if int64(len(converted)) > maxBytes {
+		return nil, errors.New("converted image is too large")
+	}
+	return converted, nil
+}
 
 const imageMetadataEndpoint = "https://upload.api.weibo.com/2/mss/meta_query.json"
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/xuekeven/weibo-assistant/internal/browser"
 	"github.com/xuekeven/weibo-assistant/internal/config"
 	"github.com/xuekeven/weibo-assistant/internal/notifier"
 	"github.com/xuekeven/weibo-assistant/internal/store"
@@ -30,6 +32,7 @@ type Server struct {
 	mux          *http.ServeMux
 	wsHub        *websocketHub
 	avatarClient *http.Client
+	imageFetcher func(context.Context, int, string, int64) ([]byte, string, error)
 }
 
 func NewServer(cfg config.Config, st *store.Store, notify *notifier.WeworkClient) *Server {
@@ -40,6 +43,7 @@ func NewServer(cfg config.Config, st *store.Store, notify *notifier.WeworkClient
 		mux:          http.NewServeMux(),
 		wsHub:        newWebsocketHub(),
 		avatarClient: newAvatarHTTPClient(),
+		imageFetcher: browser.FetchAuthenticatedImage,
 	}
 	s.routes()
 	return s
@@ -63,6 +67,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /api/config", s.handleAppConfig)
 	s.mux.HandleFunc("GET /api/media/avatar", s.handleAvatar)
+	s.mux.HandleFunc("GET /api/media/image", s.handleImage)
 	s.mux.HandleFunc("GET /api/groups", s.handleListGroups)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("GET /api/messages", s.handleListMessages)

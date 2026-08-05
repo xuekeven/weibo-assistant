@@ -1,6 +1,6 @@
 # systemd 长期运行与日志查看
 
-本文描述当前三个 Go 进程的生产部署方式。快速入口见 [项目 README](../README.md)，架构说明见 [1.技术方案.md](./1.技术方案.md)。
+本文描述当前统一前后端的生产部署方式。快速入口见 [项目 README](../README.md)，架构说明见 [1.技术方案.md](./1.技术方案.md)。
 
 ## 目录
 
@@ -16,7 +16,7 @@
 - [日志查看](#日志查看)
 - [健康检查](#健康检查)
 - [部署后验收](#部署后验收)
-- [前端部署](#前端部署)
+- [统一前后端与 Nginx 子路径部署](#统一前后端与-nginx-子路径部署)
 - [常见问题](#常见问题)
 
 ## 目标
@@ -25,8 +25,8 @@
 
 - 后端 API / WebSocket 常驻，默认监听 `6001`。
 - 监控进程常驻，复用微博登录态打开网页版群聊并监听 WebSocket 消息。
-- 可选前端服务常驻，默认监听 `6002`。
-- server 和 monitor 日志写入项目的 `logs/` 目录并自动轮转；frontend 日志进入 `journald`。
+- Vue 构建产物由 server 同端口托管，不再需要独立前端服务。
+- server 和 monitor 日志写入项目的 `logs/` 目录并自动轮转。
 
 ## 服务拆分
 
@@ -34,14 +34,9 @@
 
 | 服务 | 命令 | 作用 |
 | --- | --- | --- |
-| `weibo-assistant-server.service` | `bin/weibo-assistant server` | 提供 HTTP API、前端 WebSocket、数据库查询、实时推送 |
+| `weibo-assistant-server.service` | `bin/weibo-assistant server` | 提供 Vue 页面、HTTP API、WebSocket、图片代理、数据库查询和实时推送 |
 | `weibo-assistant-monitor.service` | `bin/weibo-assistant monitor` | 启动无头 Chrome，处理二维码登录，监听微博群聊消息，写入 PostgreSQL，命中规则后通知企业微信 |
 
-前端是可选服务：
-
-| 服务 | 命令 | 作用 |
-| --- | --- | --- |
-| `weibo-assistant-frontend.service` | `bin/weibo-assistant frontend` | 用 Go 静态文件服务暴露 Vue 构建产物，不依赖生产 Node 进程 |
 
 ## 推荐目录
 
@@ -76,7 +71,7 @@ cd ~/repos/weibo-assistant
 
 ```bash
 sudo apt update
-sudo apt install logrotate
+sudo apt install logrotate libheif-examples
 systemctl --version | head -n 1
 ```
 
@@ -146,10 +141,9 @@ APP_ENV=production
 DATABASE_URL=postgresql://weibo_user:换成强密码@127.0.0.1:5432/weibo_data
 BACKEND_PORT=6001
 BACKEND_BIND_ADDRESS=0.0.0.0
-FRONTEND_PORT=6002
-FRONTEND_BIND_ADDRESS=0.0.0.0
+FRONTEND_PORT=6001
 FRONTEND_DIST_DIR=/home/你的用户名/repos/weibo-assistant/frontend/dist
-CORS_ALLOWED_ORIGINS=
+CORS_ALLOWED_ORIGINS=https://weibo.example.ts.net
 
 WEIBO_CHAT_URL=https://api.weibo.com/chat#/chat
 WEIBO_PROFILE_DIR=/home/你的用户名/repos/weibo-assistant/.weibo-profile
@@ -186,9 +180,9 @@ chmod 600 ~/repos/weibo-assistant/.env
 
 `FRONTEND_DIST_DIR` 和 `WEIBO_PROFILE_DIR` 建议填写绝对路径。可先执行 `echo "$HOME"` 查看自己的 home 目录，再替换示例中的 `/home/你的用户名`。
 
-`BACKEND_BIND_ADDRESS=0.0.0.0` 和 `FRONTEND_BIND_ADDRESS=0.0.0.0` 支持从 Tailscale 内网访问。前端通过访问页面时的主机名连接同一主机的 `6001` 端口，因此可直接打开 `http://<Tailscale-IP>:6002` 或对应 MagicDNS 地址。若要只监听 Tailscale 网卡，可将两个值改为本机的 Tailscale `100.x` 地址；同时建议使用主机防火墙禁止公网接口访问 `6001/6002`。
+`BACKEND_BIND_ADDRESS=0.0.0.0` 允许从 Tailscale 内网访问统一的 6001 服务。若只允许本机 Nginx 转发，可改为 `127.0.0.1`；若直接从 Tailscale IP 访问，可改为对应 `100.x` 地址并限制防火墙端口。
 
-`CORS_ALLOWED_ORIGINS` 留空时，会自动接受从 `FRONTEND_PORT` 发起的 localhost、私有 IP、Tailscale `100.64.0.0/10` 和 `*.ts.net` Origin。需要使用其他域名或反向代理时，应填写完整 Origin，例如 `https://weibo.example.ts.net`；多个值用逗号分隔。
+统一生产部署应显式填写 `CORS_ALLOWED_ORIGINS`，值为浏览器实际访问页面的完整 Origin，例如 `https://homeserver.example.ts.net`。路径 `/weibo/` 不属于 Origin，不要写入该变量；多个 Origin 用逗号分隔。否则 WebSocket 握手会返回 `403 websocket origin is not allowed`。
 
 ## 首次微博扫码登录
 
@@ -217,7 +211,6 @@ monitor 进入监控主循环时发送“微博群聊monitor已开启”，正�
 ```text
 deploy/systemd/weibo-assistant-server.service
 deploy/systemd/weibo-assistant-monitor.service
-deploy/systemd/weibo-assistant-frontend.service
 ```
 
 推荐用脚本安装。先确认当前用户和项目绝对路径：
@@ -248,26 +241,16 @@ sudo APP_DIR="$HOME/repos/weibo-assistant" \
   ./scripts/install-systemd.sh
 ```
 
-连前端服务一起安装：
-
-```bash
-sudo APP_DIR="$HOME/repos/weibo-assistant" \
-  RUN_USER="$(id -un)" \
-  RUN_GROUP="$(id -gn)" \
-  INSTALL_FRONTEND=true \
-  ./scripts/install-systemd.sh
-```
 
 脚本会把 `APP_DIR`、`RUN_USER`、`RUN_GROUP` 和该用户真实的 home 目录写入 unit 文件。服务最终以当前 Linux 用户运行，因此能直接访问该用户的 `.weibo-profile`，不需要额外创建 `weibo` 系统用户。特殊账号无法通过系统用户数据库取得 home 时，可额外传入 `RUN_HOME=/实际/home/目录`。
 
-安装脚本会在写入 unit 前检查：systemd 版本、绝对 `APP_DIR`、运行用户和组、二进制、`.env`、迁移文件、`logrotate`；安装 frontend 时还会检查 `frontend/dist/index.html`。写入后还会验证 systemd unit 和 logrotate 配置，任一检查失败都会停止，不会启用不完整的服务。
+安装脚本会在写入 unit 前检查：systemd 版本、绝对 `APP_DIR`、运行用户和组、二进制、`.env`、迁移文件和 `logrotate`。统一 server 还要求构建产物 `frontend/dist/index.html` 存在。写入后还会验证 systemd unit 和 logrotate 配置，任一检查失败都会停止，不会启用不完整的服务。
 
 脚本会把模板渲染到：
 
 ```text
 /etc/systemd/system/weibo-assistant-server.service
 /etc/systemd/system/weibo-assistant-monitor.service
-/etc/systemd/system/weibo-assistant-frontend.service
 /etc/logrotate.d/weibo-assistant
 ```
 
@@ -286,18 +269,12 @@ sudo systemctl enable --now weibo-assistant-server.service
 sudo systemctl enable --now weibo-assistant-monitor.service
 ```
 
-如果使用前端服务：
-
-```bash
-sudo systemctl enable --now weibo-assistant-frontend.service
-```
 
 查看状态：
 
 ```bash
 ./scripts/systemd-status.sh server
 ./scripts/systemd-status.sh monitor
-./scripts/systemd-status.sh frontend
 ./scripts/systemd-status.sh all
 ```
 
@@ -306,7 +283,6 @@ sudo systemctl enable --now weibo-assistant-frontend.service
 ```bash
 systemctl status weibo-assistant-server.service
 systemctl status weibo-assistant-monitor.service
-systemctl status weibo-assistant-frontend.service
 ```
 
 重启：
@@ -314,7 +290,6 @@ systemctl status weibo-assistant-frontend.service
 ```bash
 sudo systemctl restart weibo-assistant-server.service
 sudo systemctl restart weibo-assistant-monitor.service
-sudo systemctl restart weibo-assistant-frontend.service
 ```
 
 停止：
@@ -333,10 +308,9 @@ git pull
 ./bin/weibo-assistant migrate
 sudo systemctl restart weibo-assistant-server.service
 sudo systemctl restart weibo-assistant-monitor.service
-sudo systemctl restart weibo-assistant-frontend.service
 ```
 
-如果没有安装前端服务，省略 frontend 的重启命令。执行迁移后再重启，可以在旧进程仍然运行时提前发现数据库升级错误。
+server 会同时重新加载后端与 frontend/dist，无需重启独立前端服务。执行迁移后再重启，可以在旧进程仍然运行时提前发现数据库升级错误。
 
 ## 日志查看
 
@@ -347,20 +321,19 @@ logs/server.log
 logs/monitor.log
 ```
 
-安装脚本会自动创建目录与文件，并安装 `/etc/logrotate.d/weibo-assistant`：日志每天轮转，保留 14 份并压缩旧日志。frontend 仍写入 `journald`。
+安装脚本会自动创建目录与文件，并安装 `/etc/logrotate.d/weibo-assistant`：日志每天轮转，保留 14 份并压缩旧日志。
 
-安装前请确认服务器已有 `logrotate`（Ubuntu/Debian 可执行 `sudo apt install logrotate`）；安装脚本检测不到时会停止，避免日志在无轮转保护的情况下持续增长。
+安装前请确认服务器已有 `logrotate` 和 `libheif-examples`（Ubuntu/Debian 可执行 `sudo apt install logrotate libheif-examples`）；安装脚本检测不到时会停止，避免日志在无轮转保护的情况下持续增长。
 
 推荐使用脚本：
 
 ```bash
 ./scripts/systemd-logs.sh server
 ./scripts/systemd-logs.sh monitor
-./scripts/systemd-logs.sh frontend
 ./scripts/systemd-logs.sh all
 ```
 
-默认显示最近 `200` 行并持续跟随。`all` 同时跟随 server 和 monitor；frontend 需单独查看。想调整行数：
+默认显示最近 `200` 行并持续跟随。`all` 同时跟随 server 和 monitor。想调整行数：
 
 ```bash
 LOG_LINES=500 ./scripts/systemd-logs.sh monitor
@@ -371,7 +344,6 @@ LOG_LINES=500 ./scripts/systemd-logs.sh monitor
 ```bash
 tail -n 200 -f logs/server.log
 tail -n 200 -f logs/monitor.log
-journalctl -u weibo-assistant-frontend.service -n 200 -f
 ```
 
 按时间或日志等级过滤可使用 `rg`：
@@ -436,13 +408,11 @@ websocket broadcast
 ```bash
 systemctl is-active weibo-assistant-server.service
 systemctl is-active weibo-assistant-monitor.service
-# 仅在安装了项目 frontend service 时执行：
-systemctl is-active weibo-assistant-frontend.service
 
 curl --fail http://127.0.0.1:6001/livez
 curl --fail http://127.0.0.1:6001/readyz
 curl --fail http://127.0.0.1:6001/api/monitor/status
-curl --fail http://127.0.0.1:6002/
+curl --fail http://127.0.0.1:6001/
 
 ls -l logs/server.log logs/monitor.log
 sudo logrotate --debug /etc/logrotate.d/weibo-assistant
@@ -450,40 +420,46 @@ sudo logrotate --debug /etc/logrotate.d/weibo-assistant
 
 `/readyz` 返回成功代表数据库可用且 monitor 心跳仍新鲜；还应确认 `/api/monitor/status` 中 `fresh=true`，且 `logs/monitor.log` 出现 `network monitor enabled` 和持续更新的 `monitor heartbeat`。
 
-## 前端部署
+## 统一前后端与 Nginx 子路径部署
 
-简单方式是使用项目自带的前端 systemd 服务：
+生产环境由 `weibo-assistant-server.service` 在 `6001` 同时提供 Vue 页面、API 和 WebSocket，不需要启动任何独立前端服务。构建并重启：
 
 ```bash
 cd ~/repos/weibo-assistant
 ./scripts/build-linux.sh
-sudo APP_DIR="$HOME/repos/weibo-assistant" \
-  RUN_USER="$(id -un)" \
-  RUN_GROUP="$(id -gn)" \
-  INSTALL_FRONTEND=true \
-  ./scripts/install-systemd.sh
-sudo systemctl enable --now weibo-assistant-frontend.service
+sudo systemctl restart weibo-assistant-server.service
 ```
 
-访问：
+使用 `/weibo/` 子路径时，前端构建的 base 为 `/weibo/`。Nginx 只需一个代理块：
 
-```text
-http://服务器IP:6002
+```nginx
+location = /weibo {
+    return 301 /weibo/;
+}
+
+location /weibo/ {
+    proxy_pass http://127.0.0.1:6001/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400;
+}
 ```
 
-如果后端不是同一台机器或不是 `6001`，创建：
-
-```text
-~/repos/weibo-assistant/frontend/.env.production
-```
-
-内容示例：
+对应 `.env`：
 
 ```env
-VITE_API_BASE=http://服务器IP:6001
+BACKEND_PORT=6001
+FRONTEND_PORT=6001
+FRONTEND_DIST_DIR=/home/你的用户名/repos/weibo-assistant/frontend/dist
+CORS_ALLOWED_ORIGINS=https://homeserver.example.ts.net
 ```
 
-更正式的生产部署可以用 Nginx 直接托管 `frontend/dist/`，再把 `/api` 和 `/api/ws` 反向代理到 `127.0.0.1:6001`。
+这里的 Origin 不包含 `/weibo/` 路径。修改后执行 `sudo nginx -t`、重新加载 Nginx 并重启 server。
 
 ## 常见问题
 
@@ -555,7 +531,7 @@ curl http://127.0.0.1:6001/api/monitor/status
 curl "http://127.0.0.1:6001/api/messages?limit=5"
 ```
 
-如果附件只有 `fid` 没有 `url`，说明还没有从微博 payload 或 DOM/network 响应里解析出可展示地址。继续观察 monitor 日志里的图片解析相关输出。
+如果附件只有 `fid` 没有 `url`，说明还没有从微博 payload 或 DOM/network 响应里解析出可展示地址，继续观察 monitor 日志。若已有 `url` 但仍不显示，检查 server 日志和 `GET /api/media/image`：该接口会复用已登录 Chromium 的微博 Cookie 代取图片，并把 HEIC 转为 JPEG；因此 monitor 必须在线且服务器需安装 `libheif-examples`。
 
 ### Chrome 沙箱报错
 

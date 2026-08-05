@@ -32,9 +32,13 @@ func RunServer(ctx context.Context, cfg config.Config) error {
 	}
 	notify := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
 	api := httpapi.NewServer(cfg, st, notify)
+	frontend, err := frontendFileHandler(cfg.FrontendDistDir)
+	if err != nil {
+		return fmt.Errorf("load frontend for unified server: %w", err)
+	}
 	server := &http.Server{
 		Addr:              api.Addr(),
-		Handler:           api.Handler(),
+		Handler:           unifiedHTTPHandler(api.Handler(), frontend),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -66,6 +70,22 @@ func RunServer(ctx context.Context, cfg config.Config) error {
 		}
 		return err
 	}
+}
+
+func unifiedHTTPHandler(apiHandler, frontendHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/api/") ||
+			path == "/api" ||
+			path == "/livez" ||
+			path == "/readyz" ||
+			path == "/healthz" ||
+			path == "/metrics" {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		frontendHandler.ServeHTTP(w, r)
+	})
 }
 
 func RunMonitor(ctx context.Context, cfg config.Config) error {

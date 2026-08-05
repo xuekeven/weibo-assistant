@@ -1,4 +1,4 @@
-const defaultAPIBase = `${window.location.protocol}//${window.location.hostname}:6001`
+const defaultAPIBase = window.location.origin + import.meta.env.BASE_URL.slice(0, -1)
 const API_BASE = (import.meta.env.VITE_API_BASE || defaultAPIBase).replace(/\/$/, '')
 const WS_BASE = API_BASE.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')
 
@@ -14,6 +14,18 @@ export function avatarDisplayURL(rawURL?: string) {
   } catch {
     return value
   }
+  return value
+}
+
+export function imageDisplayURL(rawURL?: string) {
+  const value = (rawURL || "").trim()
+  if (!value) return ""
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol === "https:" && parsed.hostname.toLowerCase() === "upload.api.weibo.com") {
+      return API_BASE + "/api/media/image?url=" + encodeURIComponent(parsed.toString())
+    }
+  } catch { return value }
   return value
 }
 
