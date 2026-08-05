@@ -393,10 +393,10 @@ target message wework notification sent
 后端日志里重点看：
 
 ```text
-api server listening
-realtime listener starting
-websocket client connected
-websocket broadcast
+后端服务已启动
+实时消息服务已启动，正在等待新消息
+网页已连接实时消息
+实时消息已推送到网页
 ```
 
 生产 `info` 日志不会输出群聊正文、群名和昵称。若临时设置 `LOG_LEVEL=debug`，完成排查后应立即恢复；调试内容会随项目日志按 14 天轮转策略到期清理，如需更短保留期可调整 `/etc/logrotate.d/weibo-assistant`。
@@ -512,9 +512,9 @@ monitor heartbeat
 重点看：
 
 ```text
-websocket client connected
-realtime listener starting
-websocket broadcast
+网页已连接实时消息
+实时消息服务已启动，正在等待新消息
+实时消息已推送到网页
 ```
 
 同时确认前端访问的后端地址正确：

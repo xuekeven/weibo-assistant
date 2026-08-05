@@ -43,7 +43,7 @@ func (h *websocketHub) add(client *websocketClient) {
 	h.clients[client] = struct{}{}
 	count := len(h.clients)
 	h.mu.Unlock()
-	slog.Info("websocket client connected", "clients", count)
+	slog.Info("网页已连接实时消息", "当前网页连接数", count)
 }
 
 func (h *websocketHub) remove(client *websocketClient) {
@@ -51,18 +51,23 @@ func (h *websocketHub) remove(client *websocketClient) {
 	delete(h.clients, client)
 	count := len(h.clients)
 	h.mu.Unlock()
-	slog.Info("websocket client disconnected", "clients", count)
+	slog.Info("网页已断开实时消息", "剩余网页连接数", count)
 }
 
 func (h *websocketHub) broadcast(value any) {
 	payload, err := json.Marshal(value)
 	if err != nil {
-		slog.Warn("marshal websocket event failed", "error", err)
+		slog.Warn("实时消息整理失败，无法推送到网页", "错误", err)
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	slog.Info("websocket broadcast", "clients", len(h.clients), "bytes", len(payload))
+	clientCount := len(h.clients)
+	if clientCount == 0 {
+		slog.Info("实时消息暂未推送：当前没有网页连接", "数据大小（字节）", len(payload))
+	} else {
+		slog.Info("实时消息已推送到网页", "网页连接数", clientCount, "数据大小（字节）", len(payload))
+	}
 	for client := range h.clients {
 		select {
 		case client.send <- websocketOutbound{opcode: 0x1, payload: payload}:
