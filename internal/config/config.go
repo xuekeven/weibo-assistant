@@ -102,7 +102,7 @@ func Load(envPath string) (Config, error) {
 		NotificationMaxAttempts:  readInt("NOTIFICATION_MAX_ATTEMPTS", 8),
 		HealthCheckInterval:      time.Duration(readInt("HEALTH_CHECK_INTERVAL_SECONDS", 60)) * time.Second,
 		MonitorStaleAfter:        time.Duration(readInt("MONITOR_STALE_AFTER_SECONDS", 180)) * time.Second,
-		PageReloadInterval:       time.Duration(readInt("PAGE_RELOAD_INTERVAL_MINUTES", 0)) * time.Minute,
+		PageReloadInterval:       time.Duration(readInt("PAGE_RELOAD_INTERVAL_MINUTES", 360)) * time.Minute,
 		ImageCacheTTL:            time.Duration(readInt("IMAGE_CACHE_TTL_SECONDS", 86400)) * time.Second,
 		ImageCacheMaxItems:       readInt("IMAGE_CACHE_MAX_ITEMS", 1000),
 		LoginQRRefreshInterval:   time.Duration(readInt("LOGIN_QR_REFRESH_SECONDS", 120)) * time.Second,

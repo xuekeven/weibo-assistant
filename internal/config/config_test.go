@@ -61,3 +61,15 @@ func TestLoadHealthCheckIntervalUsesSeconds(t *testing.T) {
 		t.Fatalf("expected 12s health check interval, got %s", cfg.HealthCheckInterval)
 	}
 }
+
+func TestLoadDefaultsToPeriodicPageReload(t *testing.T) {
+	t.Setenv("PAGE_RELOAD_INTERVAL_MINUTES", "")
+
+	cfg, err := Load("testdata/does-not-exist.env")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.PageReloadInterval != 6*time.Hour {
+		t.Fatalf("expected 6h page reload interval, got %s", cfg.PageReloadInterval)
+	}
+}
