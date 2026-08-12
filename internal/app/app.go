@@ -17,6 +17,7 @@ import (
 	"github.com/xuekeven/weibo-assistant/internal/migrate"
 	"github.com/xuekeven/weibo-assistant/internal/notifier"
 	"github.com/xuekeven/weibo-assistant/internal/store"
+	"github.com/xuekeven/weibo-assistant/internal/systemmetrics"
 )
 
 func RunServer(ctx context.Context, cfg config.Config) error {
@@ -327,6 +328,16 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		},
 		OnTrackedRequests: func(count int) {
 			metrics.trackedRequests.Store(int64(count))
+		},
+		OnBeforePageReload: func(reloadCtx context.Context) error {
+			return checkCPUHealthBeforePageReload(
+				reloadCtx,
+				systemmetrics.ReadCPU,
+				weworkClient,
+				weworkEnabled,
+				cfg.CPUPowerAlertWatts,
+				cfg.CPUTemperatureAlertC,
+			)
 		},
 		OnLoginRequired: loginAlerts.Notify,
 		OnLoginRestored: func() {

@@ -11,6 +11,9 @@ WorkingDirectory=__APP_DIR__
 Environment=APP_ENV=production
 Environment=HOME=__RUN_HOME__
 EnvironmentFile=-__APP_DIR__/.env
+# RAPL 能耗计数器默认仅 root 可读；只把 package 能耗读取权限授予 monitor 所在组。
+ExecStartPre=+/bin/chgrp __RUN_GROUP__ /sys/class/powercap/intel-rapl:0/energy_uj
+ExecStartPre=+/bin/chmod 0640 /sys/class/powercap/intel-rapl:0/energy_uj
 ExecStart=__APP_DIR__/bin/weibo-assistant monitor
 Restart=always
 RestartSec=8

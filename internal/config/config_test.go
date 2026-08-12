@@ -62,8 +62,10 @@ func TestLoadHealthCheckIntervalUsesSeconds(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultsToPeriodicPageReload(t *testing.T) {
+func TestLoadDefaultsToSixHourPageReloadAndCPUAlertThresholds(t *testing.T) {
 	t.Setenv("PAGE_RELOAD_INTERVAL_MINUTES", "")
+	t.Setenv("CPU_POWER_ALERT_WATTS", "")
+	t.Setenv("CPU_TEMPERATURE_ALERT_CELSIUS", "")
 
 	cfg, err := Load("testdata/does-not-exist.env")
 	if err != nil {
@@ -71,5 +73,8 @@ func TestLoadDefaultsToPeriodicPageReload(t *testing.T) {
 	}
 	if cfg.PageReloadInterval != 6*time.Hour {
 		t.Fatalf("expected 6h page reload interval, got %s", cfg.PageReloadInterval)
+	}
+	if cfg.CPUPowerAlertWatts != 25 || cfg.CPUTemperatureAlertC != 75 {
+		t.Fatalf("unexpected CPU alert thresholds: power=%d temperature=%d", cfg.CPUPowerAlertWatts, cfg.CPUTemperatureAlertC)
 	}
 }

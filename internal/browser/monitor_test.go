@@ -12,6 +12,24 @@ import (
 	"time"
 )
 
+func TestMonitorArgsAvoidRendererBusyLoopAndAllowBackgroundThrottling(t *testing.T) {
+	args := monitorArgs(MonitorOptions{URL: "https://api.weibo.com/chat#/chat"}, "/tmp/weibo-profile")
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "--disable-features=BusyLoopOnMainThread") {
+		t.Fatalf("expected renderer busy loop to be disabled, got %q", joined)
+	}
+	for _, unwanted := range []string{
+		"--disable-background-timer-throttling",
+		"--disable-backgrounding-occluded-windows",
+		"--disable-renderer-backgrounding",
+	} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("expected Chromium background throttling to remain enabled; found %q", unwanted)
+		}
+	}
+}
+
 func TestSelectPageTargetPrefersWeiboChat(t *testing.T) {
 	targets := []chromeTarget{
 		{Type: "page", URL: "https://example.com", WebSocketDebuggerURL: "ws://example"},

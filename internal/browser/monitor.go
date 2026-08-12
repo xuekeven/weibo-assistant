@@ -49,6 +49,7 @@ type MonitorOptions struct {
 	OnWebSocketState       func(connected bool, reconnected bool)
 	OnMessagesParsed       func(int)
 	OnTrackedRequests      func(int)
+	OnBeforePageReload     func(context.Context) error
 	OnLoginRequired        func(context.Context, LoginRequiredEvent) error
 	OnLoginRestored        func()
 }
@@ -402,6 +403,11 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				opts.OnPageTarget(target.WebSocketDebuggerURL)
 			}
 		case <-reloadC:
+			if opts.OnBeforePageReload != nil {
+				if err := opts.OnBeforePageReload(ctx); err != nil {
+					slog.Warn("page reload preflight check failed", "error", err)
+				}
+			}
 			slog.Info("page reload interval reached; reloading current chat page", "url", networkURLLogValue(target.URL))
 			if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
 				slog.Warn("page reload failed", "error", err)
@@ -436,9 +442,9 @@ func monitorArgs(opts MonitorOptions, profileDir string) []string {
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--disable-dev-shm-usage",
-		"--disable-background-timer-throttling",
-		"--disable-backgrounding-occluded-windows",
-		"--disable-renderer-backgrounding",
+		// 长期运行的 headless renderer 不需要为交互延迟主动忙等。显式关闭该
+		// Chromium 实验，避免主线程与 foreground worker 高频互相唤醒。
+		"--disable-features=BusyLoopOnMainThread",
 	}
 	if opts.Headless {
 		args = append(args, "--headless=new")
