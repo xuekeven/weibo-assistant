@@ -62,7 +62,7 @@ func cpuHealthAlertText(snapshot systemmetrics.CPUSnapshot, powerThresholdWatts 
 		return "", false
 	}
 	return fmt.Sprintf(
-		"微博群聊 monitor 定时重载前检测到 CPU 异常\nCPU Package 功率：%s（告警阈值：%d W）\nCPU Package 温度：%s（告警阈值：%d℃）\n异常项：%s",
+		"微博群聊 monitor 页面恢复前检测到 CPU 异常\nCPU Package 功率：%s（告警阈值：%d W）\nCPU Package 温度：%s（告警阈值：%d℃）\n异常项：%s",
 		powerText,
 		powerThresholdWatts,
 		temperatureText,

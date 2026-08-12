@@ -66,6 +66,9 @@ func TestLoadDefaultsToSixHourPageReloadAndCPUAlertThresholds(t *testing.T) {
 	t.Setenv("PAGE_RELOAD_INTERVAL_MINUTES", "")
 	t.Setenv("CPU_POWER_ALERT_WATTS", "")
 	t.Setenv("CPU_TEMPERATURE_ALERT_CELSIUS", "")
+	t.Setenv("CHROME_RENDERER_CPU_LIMIT_PERCENT", "")
+	t.Setenv("CHROME_RENDERER_CPU_CONSECUTIVE_CHECKS", "")
+	t.Setenv("CHROME_RENDERER_CPU_CHECK_INTERVAL_SECONDS", "")
 
 	cfg, err := Load("testdata/does-not-exist.env")
 	if err != nil {
@@ -76,5 +79,8 @@ func TestLoadDefaultsToSixHourPageReloadAndCPUAlertThresholds(t *testing.T) {
 	}
 	if cfg.CPUPowerAlertWatts != 25 || cfg.CPUTemperatureAlertC != 75 {
 		t.Fatalf("unexpected CPU alert thresholds: power=%d temperature=%d", cfg.CPUPowerAlertWatts, cfg.CPUTemperatureAlertC)
+	}
+	if cfg.RendererCPULimit != 50 || cfg.RendererCPUChecks != 3 || cfg.RendererCPUInterval != time.Minute {
+		t.Fatalf("unexpected renderer CPU watchdog defaults: limit=%d checks=%d interval=%s", cfg.RendererCPULimit, cfg.RendererCPUChecks, cfg.RendererCPUInterval)
 	}
 }

@@ -25,12 +25,15 @@ type Config struct {
 	CORSAllowedOrigins []string
 
 	// Chromium 与微博页面配置。
-	WeiboChatURL     string
-	WeiboProfileDir  string
-	Headless         bool
-	ChromeExecutable string
-	ChromeNoSandbox  bool
-	ChromeDebugPort  int
+	WeiboChatURL        string
+	WeiboProfileDir     string
+	Headless            bool
+	ChromeExecutable    string
+	ChromeNoSandbox     bool
+	ChromeDebugPort     int
+	RendererCPULimit    int
+	RendererCPUChecks   int
+	RendererCPUInterval time.Duration
 
 	// 可选的采集范围。ID 比名称稳定，因此同时配置时优先使用 ID。
 	TargetGroupName  string
@@ -93,6 +96,9 @@ func Load(envPath string) (Config, error) {
 		ChromeExecutable:         getString("CHROME_EXECUTABLE", ""),
 		ChromeNoSandbox:          readBool("CHROME_NO_SANDBOX", false),
 		ChromeDebugPort:          readInt("CHROME_DEBUG_PORT", 9222),
+		RendererCPULimit:         readInt("CHROME_RENDERER_CPU_LIMIT_PERCENT", 50),
+		RendererCPUChecks:        readInt("CHROME_RENDERER_CPU_CONSECUTIVE_CHECKS", 3),
+		RendererCPUInterval:      time.Duration(readInt("CHROME_RENDERER_CPU_CHECK_INTERVAL_SECONDS", 60)) * time.Second,
 		TargetGroupName:          getString("TARGET_GROUP_NAME", ""),
 		TargetGroupID:            getString("TARGET_GROUP_ID", ""),
 		TargetSenderName:         getString("TARGET_SENDER_NAME", ""),
@@ -134,6 +140,15 @@ func (c Config) ValidateBrowser() error {
 	}
 	if c.ChromeDebugPort <= 0 || c.ChromeDebugPort > 65535 {
 		errs = append(errs, fmt.Errorf("CHROME_DEBUG_PORT must be between 1 and 65535"))
+	}
+	if c.RendererCPULimit <= 0 {
+		errs = append(errs, errors.New("CHROME_RENDERER_CPU_LIMIT_PERCENT must be greater than 0"))
+	}
+	if c.RendererCPUChecks <= 0 {
+		errs = append(errs, errors.New("CHROME_RENDERER_CPU_CONSECUTIVE_CHECKS must be greater than 0"))
+	}
+	if c.RendererCPUInterval <= 0 {
+		errs = append(errs, errors.New("CHROME_RENDERER_CPU_CHECK_INTERVAL_SECONDS must be greater than 0"))
 	}
 	return errors.Join(errs...)
 }

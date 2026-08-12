@@ -35,6 +35,9 @@ type MonitorOptions struct {
 	Headless               bool
 	NoSandbox              bool
 	DebugPort              int
+	RendererCPULimit       int
+	RendererCPUChecks      int
+	RendererCPUInterval    time.Duration
 	HealthCheckInterval    time.Duration
 	PageReloadInterval     time.Duration
 	LoginQRRefreshInterval time.Duration
@@ -141,6 +144,15 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	if opts.HealthCheckInterval <= 0 {
 		opts.HealthCheckInterval = 60 * time.Second
 	}
+	if opts.RendererCPULimit <= 0 {
+		opts.RendererCPULimit = 50
+	}
+	if opts.RendererCPUChecks <= 0 {
+		opts.RendererCPUChecks = 3
+	}
+	if opts.RendererCPUInterval <= 0 {
+		opts.RendererCPUInterval = time.Minute
+	}
 
 	profileDir, err := filepath.Abs(opts.ProfileDir)
 	if err != nil {
@@ -178,6 +190,53 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		stopProcess(cmd)
 		return err
 	}
+	rendererCPU := newRendererCPUTracker(cmd.Process.Pid)
+	_, _, _, _ = rendererCPU.Sample()
+	rendererWatchdog := newRendererCPUWatchdog(float64(opts.RendererCPULimit), opts.RendererCPUChecks)
+	type rendererCPUReading struct {
+		pid       int
+		percent   float64
+		available bool
+		err       error
+	}
+	rendererCPUReadings := make(chan rendererCPUReading, 1)
+	go func() {
+		ticker := time.NewTicker(opts.RendererCPUInterval)
+		defer ticker.Stop()
+		baselineLogged := false
+		sampleLogged := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pid, percent, available, sampleErr := rendererCPU.Sample()
+				if sampleErr != nil {
+					slog.Warn("sample Chrome renderer CPU failed", "error", sampleErr)
+				} else if !available && !baselineLogged {
+					slog.Info("Chrome renderer CPU sampler is waiting for a comparable baseline")
+					baselineLogged = true
+				} else if available && !sampleLogged {
+					slog.Info("Chrome renderer CPU sampling is active",
+						"pid", pid,
+						"cpuPercent", percent,
+					)
+					sampleLogged = true
+				}
+				reading := rendererCPUReading{pid: pid, percent: percent, available: available, err: sampleErr}
+				select {
+				case rendererCPUReadings <- reading:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	slog.Info("Chrome renderer CPU watchdog enabled",
+		"interval", opts.RendererCPUInterval,
+		"limitPercent", opts.RendererCPULimit,
+		"consecutiveChecks", opts.RendererCPUChecks,
+	)
 
 	if opts.OnProbe != nil {
 		_ = opts.OnProbe(ctx, PageProbe{
@@ -297,6 +356,51 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		reloadC = reloadTicker.C
 	}
 
+	reloadCurrentPage := func(reason string) {
+		if opts.OnBeforePageReload != nil {
+			if err := opts.OnBeforePageReload(ctx); err != nil {
+				slog.Warn("page reload preflight check failed", "reason", reason, "error", err)
+			}
+		}
+		slog.Info("reloading current chat page", "reason", reason, "url", networkURLLogValue(target.URL))
+		if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
+			slog.Warn("page reload failed", "reason", reason, "error", err)
+		}
+	}
+
+	checkRendererCPU := func(reading rendererCPUReading) error {
+		if reading.err != nil {
+			return nil
+		}
+		if !reading.available {
+			return nil
+		}
+		action := rendererWatchdog.Observe(reading.percent)
+		if reading.percent >= float64(opts.RendererCPULimit) {
+			consecutive := rendererWatchdog.highChecks
+			if action != rendererCPUActionNone {
+				consecutive = opts.RendererCPUChecks
+			}
+			slog.Warn("Chrome renderer CPU is high",
+				"pid", reading.pid,
+				"cpuPercent", reading.percent,
+				"limitPercent", opts.RendererCPULimit,
+				"consecutive", consecutive,
+			)
+		}
+		switch action {
+		case rendererCPUActionReload:
+			reloadCurrentPage("renderer_cpu_high")
+		case rendererCPUActionRestart:
+			slog.Error("Chrome renderer CPU remained high after page reload; restarting browser process",
+				"pid", reading.pid,
+				"cpuPercent", reading.percent,
+			)
+			return fmt.Errorf("Chrome renderer CPU remained high after page reload: pid=%d cpu=%.1f%%", reading.pid, reading.percent)
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -355,6 +459,11 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 					slog.Warn("update monitor status failed", "error", err)
 				}
 			}
+		case reading := <-rendererCPUReadings:
+			if err := checkRendererCPU(reading); err != nil {
+				stopProcess(cmd)
+				return err
+			}
 		case result := <-networkErrCh:
 			if result.generation != networkGeneration {
 				continue
@@ -403,15 +512,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				opts.OnPageTarget(target.WebSocketDebuggerURL)
 			}
 		case <-reloadC:
-			if opts.OnBeforePageReload != nil {
-				if err := opts.OnBeforePageReload(ctx); err != nil {
-					slog.Warn("page reload preflight check failed", "error", err)
-				}
-			}
-			slog.Info("page reload interval reached; reloading current chat page", "url", networkURLLogValue(target.URL))
-			if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
-				slog.Warn("page reload failed", "error", err)
-			}
+			reloadCurrentPage("scheduled")
 		}
 	}
 }

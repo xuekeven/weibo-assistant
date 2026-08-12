@@ -105,6 +105,9 @@ monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关�
 | `HEADLESS` | 是否无头运行 Chrome，服务器建议设为 `true` |
 | `CHROME_EXECUTABLE` | Chrome/Chromium 路径；留空时自动查找 |
 | `CHROME_DEBUG_PORT` | CDP 本机端口，默认 `9222` |
+| `CHROME_RENDERER_CPU_LIMIT_PERCENT` | 单个 renderer 的 CPU 看门狗阈值，默认 `50%`；连续超限时先重载、仍不恢复则重启 monitor |
+| `CHROME_RENDERER_CPU_CONSECUTIVE_CHECKS` | 触发恢复动作所需的连续超限次数，默认 `3` 次 |
+| `CHROME_RENDERER_CPU_CHECK_INTERVAL_SECONDS` | 独立 renderer CPU 采样间隔，默认 `60` 秒（1 分钟） |
 | `TARGET_GROUP_ID` / `TARGET_GROUP_NAME` | 默认通知规则匹配的群聊，优先使用稳定 ID |
 | `TARGET_SENDER_ID` / `TARGET_SENDER_NAME` | 默认通知规则匹配的发送人，优先使用稳定 ID |
 | `WEWORK_RELAY_*` | 企业微信中转地址、鉴权密钥和接收人 |
