@@ -53,11 +53,25 @@ func TestRendererCPUWatchdogClearsEscalationAfterRecovery(t *testing.T) {
 	if action := watchdog.Observe(90); action != rendererCPUActionReload {
 		t.Fatalf("action = %v, want reload", action)
 	}
-	watchdog.Observe(1)
-	watchdog.Observe(2)
+	if action := watchdog.Observe(1); action != rendererCPUActionNone {
+		t.Fatalf("first recovery sample action = %v", action)
+	}
+	if action := watchdog.Observe(2); action != rendererCPUActionRecovered {
+		t.Fatalf("second recovery sample action = %v, want recovered", action)
+	}
 	watchdog.Observe(90)
 	if action := watchdog.Observe(90); action != rendererCPUActionReload {
 		t.Fatalf("recurrent incident action = %v, want a fresh reload", action)
+	}
+}
+
+func TestRendererCPUWatchdogDoesNotReportRecoveryWithoutReload(t *testing.T) {
+	watchdog := newRendererCPUWatchdog(80, 2)
+	if action := watchdog.Observe(1); action != rendererCPUActionNone {
+		t.Fatalf("normal sample action = %v", action)
+	}
+	if action := watchdog.Observe(2); action != rendererCPUActionNone {
+		t.Fatalf("normal sample action = %v", action)
 	}
 }
 

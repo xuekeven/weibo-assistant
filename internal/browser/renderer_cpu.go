@@ -10,6 +10,7 @@ type rendererCPUAction uint8
 const (
 	rendererCPUActionNone rendererCPUAction = iota
 	rendererCPUActionReload
+	rendererCPUActionRecovered
 	rendererCPUActionRestart
 )
 
@@ -33,6 +34,7 @@ func (w *rendererCPUWatchdog) Observe(percent float64) rendererCPUAction {
 			if w.healthyAfterReload >= w.requiredChecks {
 				w.awaitingRecovery = false
 				w.healthyAfterReload = 0
+				return rendererCPUActionRecovered
 			}
 		}
 		return rendererCPUActionNone

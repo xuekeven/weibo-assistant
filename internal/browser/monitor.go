@@ -53,8 +53,16 @@ type MonitorOptions struct {
 	OnMessagesParsed       func(int)
 	OnTrackedRequests      func(int)
 	OnBeforePageReload     func(context.Context) error
+	OnRendererCPURecovered func(context.Context, RendererCPUEvent) error
+	OnRendererCPURestart   func(context.Context, RendererCPUEvent) error
 	OnLoginRequired        func(context.Context, LoginRequiredEvent) error
 	OnLoginRestored        func()
+}
+
+type RendererCPUEvent struct {
+	PID          int
+	CPUPercent   float64
+	LimitPercent int
 }
 
 type LoginRequiredEvent struct {
@@ -391,11 +399,29 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		switch action {
 		case rendererCPUActionReload:
 			reloadCurrentPage("renderer_cpu_high")
+		case rendererCPUActionRecovered:
+			slog.Info("Chrome renderer CPU recovered after page reload",
+				"pid", reading.pid,
+				"cpuPercent", reading.percent,
+				"limitPercent", opts.RendererCPULimit,
+			)
+			if opts.OnRendererCPURecovered != nil {
+				event := RendererCPUEvent{PID: reading.pid, CPUPercent: reading.percent, LimitPercent: opts.RendererCPULimit}
+				if err := opts.OnRendererCPURecovered(ctx, event); err != nil {
+					slog.Warn("send Chrome renderer CPU recovery notification failed", "error", err)
+				}
+			}
 		case rendererCPUActionRestart:
 			slog.Error("Chrome renderer CPU remained high after page reload; restarting browser process",
 				"pid", reading.pid,
 				"cpuPercent", reading.percent,
 			)
+			if opts.OnRendererCPURestart != nil {
+				event := RendererCPUEvent{PID: reading.pid, CPUPercent: reading.percent, LimitPercent: opts.RendererCPULimit}
+				if err := opts.OnRendererCPURestart(ctx, event); err != nil {
+					slog.Warn("send Chrome renderer CPU restart notification failed", "error", err)
+				}
+			}
 			return fmt.Errorf("Chrome renderer CPU remained high after page reload: pid=%d cpu=%.1f%%", reading.pid, reading.percent)
 		}
 		return nil

@@ -342,6 +342,19 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 				cfg.CPUTemperatureAlertC,
 			)
 		},
+		OnRendererCPURecovered: func(recoveryCtx context.Context, event browser.RendererCPUEvent) error {
+			return sendRendererCPURecoveredNotification(
+				recoveryCtx,
+				systemmetrics.ReadCPU,
+				weworkClient,
+				weworkEnabled,
+				event,
+				cfg.RendererCPUChecks,
+			)
+		},
+		OnRendererCPURestart: func(restartCtx context.Context, event browser.RendererCPUEvent) error {
+			return sendRendererCPURestartNotification(restartCtx, weworkClient, weworkEnabled, event)
+		},
 		OnLoginRequired: loginAlerts.Notify,
 		OnLoginRestored: func() {
 			// 企微不可用不应阻塞微博监听恢复；后台进行有上限的重试。
