@@ -1303,6 +1303,77 @@ type networkRequestInfo struct {
 
 const maxTrackedNetworkRequests = 10000
 
+var monitoredPageBlockedURLs = []string{
+	"*conchfairy.sinajs.cn/lib/chat.mp3*",
+	"*upload.api.weibo.com/2/mss/msget?*",
+}
+
+const suppressMonitoredPageMediaExpression = `(() => {
+  if (globalThis.__weiboMonitorMediaSuppressionInstalled) {
+    return 0;
+  }
+  globalThis.__weiboMonitorMediaSuppressionInstalled = true;
+
+  const suppress = (root) => {
+    const nodes = [];
+    if (root instanceof HTMLMediaElement) nodes.push(root);
+    if (root instanceof HTMLSourceElement && root.parentElement instanceof HTMLMediaElement) {
+      nodes.push(root.parentElement);
+    }
+    if (root?.querySelectorAll) nodes.push(...root.querySelectorAll('audio,video'));
+    for (const media of new Set(nodes)) {
+      try { media.pause(); } catch (_) {}
+      media.autoplay = false;
+      media.muted = true;
+      media.removeAttribute('autoplay');
+      media.removeAttribute('src');
+      for (const source of media.querySelectorAll('source')) source.removeAttribute('src');
+      try { media.load(); } catch (_) {}
+    }
+    return nodes.length;
+  };
+
+  HTMLMediaElement.prototype.play = function () {
+    try { this.pause(); } catch (_) {}
+    return Promise.resolve();
+  };
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      suppress(record.target);
+      for (const node of record.addedNodes) suppress(node);
+    }
+  });
+  observer.observe(document, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['src', 'autoplay'],
+  });
+  return suppress(document);
+})()`
+
+func suppressMonitoredPageMedia(ctx context.Context, client *cdpClient) error {
+	if err := client.call(ctx, "Network.setBlockedURLs", map[string]any{
+		"urls": monitoredPageBlockedURLs,
+	}, nil); err != nil {
+		return fmt.Errorf("block monitored page media URLs: %w", err)
+	}
+	if err := client.call(ctx, "Page.addScriptToEvaluateOnNewDocument", map[string]any{
+		"source": suppressMonitoredPageMediaExpression,
+	}, nil); err != nil {
+		return fmt.Errorf("install monitored page media suppression: %w", err)
+	}
+	var suppressed int
+	if err := client.evaluate(ctx, suppressMonitoredPageMediaExpression, &suppressed); err != nil {
+		return fmt.Errorf("suppress current monitored page media: %w", err)
+	}
+	slog.Info("monitored page media playback disabled",
+		"currentMediaElements", suppressed,
+		"blockedURLPatterns", len(monitoredPageBlockedURLs),
+	)
+	return nil
+}
+
 func monitorNetworkEvents(
 	ctx context.Context,
 	webSocketDebuggerURL string,
@@ -1327,6 +1398,9 @@ func monitorNetworkEvents(
 		"maxResourceBufferSize": 5 * 1024 * 1024,
 	}, nil); err != nil {
 		return fmt.Errorf("enable network domain: %w", err)
+	}
+	if err := suppressMonitoredPageMedia(ctx, client); err != nil {
+		return err
 	}
 	slog.Info("network monitor enabled")
 

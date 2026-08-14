@@ -30,6 +30,20 @@ func TestMonitorArgsAvoidRendererBusyLoopAndAllowBackgroundThrottling(t *testing
 	}
 }
 
+func TestMonitoredPageMediaSuppressionCoversNotificationAudioAndFullMedia(t *testing.T) {
+	joined := strings.Join(monitoredPageBlockedURLs, " ")
+	for _, expected := range []string{"conchfairy.sinajs.cn/lib/chat.mp3", "upload.api.weibo.com/2/mss/msget?"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("blocked URL patterns %q do not contain %q", joined, expected)
+		}
+	}
+	for _, expected := range []string{"HTMLMediaElement.prototype.play", "MutationObserver", "audio,video"} {
+		if !strings.Contains(suppressMonitoredPageMediaExpression, expected) {
+			t.Fatalf("media suppression expression does not contain %q", expected)
+		}
+	}
+}
+
 func TestSelectPageTargetPrefersWeiboChat(t *testing.T) {
 	targets := []chromeTarget{
 		{Type: "page", URL: "https://example.com", WebSocketDebuggerURL: "ws://example"},
