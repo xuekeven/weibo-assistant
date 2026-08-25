@@ -44,6 +44,21 @@ func TestMonitoredPageMediaSuppressionCoversNotificationAudioAndFullMedia(t *tes
 	}
 }
 
+func TestExpiredLoginQRCodeDetectionAndRefreshCoverage(t *testing.T) {
+	for _, phrase := range []string{"二维码已过期", "二维码已失效", "二维码失效"} {
+		if !strings.Contains(embeddedLoginDetectionExpression, phrase) {
+			t.Fatalf("embedded login detection does not contain %q", phrase)
+		}
+		if !strings.Contains(refreshExpiredLoginQRCodeExpression, phrase) {
+			t.Fatalf("expired QR refresh expression does not contain %q", phrase)
+		}
+	}
+	for _, action := range []string{"重新刷新", "刷新二维码"} {
+		if !strings.Contains(refreshExpiredLoginQRCodeExpression, action) {
+			t.Fatalf("expired QR refresh expression does not contain action %q", action)
+		}
+	}
+}
 func TestSelectPageTargetPrefersWeiboChat(t *testing.T) {
 	targets := []chromeTarget{
 		{Type: "page", URL: "https://example.com", WebSocketDebuggerURL: "ws://example"},

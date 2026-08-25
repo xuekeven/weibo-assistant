@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BellOutlined, CopyOutlined, FileTextOutlined, ReloadOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { AimOutlined, BellOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { avatarDisplayURL, imageDisplayURL, type Attachment, type Message } from '../api'
 import { avatarColor, formatTime, initials } from '../utils/presentation'
@@ -10,12 +10,12 @@ const props = defineProps<{
   canResolveMedia: boolean
   mediaResolutionBusy: boolean
   isOwn: boolean
+  located: boolean
 }>()
 
 const emit = defineEmits<{
   details: [message: Message]
-  copy: [message: Message]
-  filterSender: [message: Message]
+  locate: [message: Message]
   createRule: [message: Message]
   preview: [url: string]
   mediaLoaded: []
@@ -137,7 +137,7 @@ watch(
   <article v-if="message.messageType === 'system'" class="message-row system-message">
     <button type="button" :title="formatTime(message.sentAt || message.capturedAt)" @click="$emit('details', message)">{{ message.content || '微博群聊系统消息' }}</button>
   </article>
-  <article v-else class="message-row" :class="{ 'own-message': isOwn }">
+  <article v-else :id="`message-${message.id}`" class="message-row" :class="{ 'own-message': isOwn, 'located-message': located }">
     <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="avatarDisplayURL(message.senderAvatar)" alt="" loading="lazy" referrerpolicy="no-referrer" @error="failedAvatarURL = message.senderAvatar || ''" />
     <span v-else class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
     <div class="message-main">
@@ -146,9 +146,8 @@ watch(
         <time :title="formatTime(message.sentAt || message.capturedAt)">{{ formatTime(message.sentAt || message.capturedAt, { seconds: false }) }}</time>
         <span class="message-actions">
           <button class="message-secondary-action" type="button" @click="$emit('details', message)"><FileTextOutlined />详情</button>
-          <button class="message-secondary-action" type="button" @click="$emit('copy', message)"><CopyOutlined />复制正文</button>
-          <button class="message-secondary-action" type="button" @click="$emit('filterSender', message)"><UserOutlined />只看此人</button>
-          <button class="message-secondary-action" type="button" @click="$emit('createRule', message)"><BellOutlined />创建通知规则</button>
+          <button class="message-secondary-action" type="button" @click="$emit('locate', message)"><AimOutlined />定位</button>
+          <button class="message-secondary-action" type="button" @click="$emit('createRule', message)"><BellOutlined />通知</button>
         </span>
       </div>
       <div class="bubble" :class="{ media: imageAttachments.length > 0 || isVideoMessage, recalled: message.messageType === 'recall' }">

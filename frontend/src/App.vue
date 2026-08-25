@@ -96,10 +96,16 @@ const autoFollowMessages = ref(true)
 const messageListRef = ref<HTMLElement | null>(null)
 const currentTime = ref(new Date())
 const mediaResolutionRequests = ref(new Set<number>())
+const locatingMessageId = ref<number | null>(null)
+const locatedMessageId = ref<number | null>(null)
+const locatedContextMessageId = ref<number | null>(null)
+const messageLocationActive = computed(() => locatingMessageId.value !== null || locatedMessageId.value !== null)
+const locationLoadingText = ref('')
 const messageRequests = createLatestRequestGate()
 const olderMessageRequests = createLatestRequestGate()
 const historyRequests = createLatestRequestGate()
 const detailRequests = createLatestRequestGate()
+const locateMessageRequests = createLatestRequestGate()
 const antTheme = {
   token: {
     colorPrimary: '#17785d',
@@ -174,6 +180,10 @@ let refreshInFlight = false
 let refreshAgain = false
 let clockTimer: number | undefined
 let keywordSearchTimer: number | undefined
+let locateHighlightTimer: number | undefined
+let suppressKeywordSearch = false
+const locatePageSize = 200
+const locateContextSize = 20
 let lastAutoHistoryBoundary = ''
 
 const selectedGroup = computed(() => {
@@ -341,7 +351,11 @@ async function runRefresh() {
     selectedGroupId.value = visibleGroups.value[0].id
   }
   if (selectedGroupId.value) {
-    await Promise.all([refreshMessages(), refreshHistorySync()])
+    if (locatingMessageId.value !== null) {
+      await refreshHistorySync()
+    } else {
+      await Promise.all([refreshMessages(), refreshHistorySync()])
+    }
   } else {
     messages.value = []
   }
@@ -378,9 +392,9 @@ async function refreshMessages() {
     for (const message of messages.value) {
       if (messageMatchesCurrentFilters(message)) merged.set(message.id, message)
     }
-    messages.value = [...merged.values()]
+    const refreshedMessages = [...merged.values()]
       .sort((a, b) => new Date(b.sentAt || b.capturedAt).getTime() - new Date(a.sentAt || a.capturedAt).getTime())
-      .slice(0, 80)
+    messages.value = locatedContextMessageId.value === null ? refreshedMessages.slice(0, 80) : refreshedMessages
     hasOlderMessages.value = items.length === 50
   } finally {
     if (messageRequests.isCurrent(request, currentMessageRequestKey())) {
@@ -437,7 +451,18 @@ async function refreshHistorySync() {
   }
 }
 
+function cancelMessageLocation() {
+  locateMessageRequests.invalidate()
+  locatingMessageId.value = null
+  locatedMessageId.value = null
+  locatedContextMessageId.value = null
+  locationLoadingText.value = ''
+  window.clearTimeout(locateHighlightTimer)
+  locateHighlightTimer = undefined
+}
+
 async function applyFilters() {
+  cancelMessageLocation()
   error.value = ''
   try {
     await refreshMessages()
@@ -462,19 +487,24 @@ async function clearFilters() {
   query.value = ''
   selectedSenderIds.value = []
   timeRange.value = 'all'
+  customDate.value = ''
   await applyFilters()
 }
 
 async function clearFilter(key: string) {
   if (key === 'query') query.value = ''
   if (key === 'sender') selectedSenderIds.value = []
-  if (key === 'time') timeRange.value = 'all'
+  if (key === 'time') {
+    timeRange.value = 'all'
+    customDate.value = ''
+  }
   await applyFilters()
 }
 
 async function selectGroup(group: Group) {
   selectedGroupId.value = group.id
   messages.value = []
+  cancelMessageLocation()
   historyJob.value = null
   messageRequests.invalidate()
   olderMessageRequests.invalidate()
@@ -552,9 +582,9 @@ function upsertMessage(message: Message) {
     messages.value.splice(index, 1, message)
   } else {
     messages.value.push(message)
-    messages.value = [...messages.value]
+    const refreshedMessages = [...messages.value]
       .sort((a, b) => new Date(b.sentAt || b.capturedAt).getTime() - new Date(a.sentAt || a.capturedAt).getTime())
-      .slice(0, 80)
+    messages.value = locatedContextMessageId.value === null ? refreshedMessages.slice(0, 80) : refreshedMessages
   }
   if (shouldFollow) {
     scrollMessagesToBottom()
@@ -696,7 +726,46 @@ function isNearMessageBottom(threshold = 120) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold
 }
 
+function centerMessageInList(messageID: number) {
+  const list = messageListRef.value
+  const target = document.getElementById(`message-${messageID}`)
+  if (!list || !target) return false
+
+  const listRect = list.getBoundingClientRect()
+  const targetRect = target.getBoundingClientRect()
+  const targetTop = list.scrollTop + targetRect.top - listRect.top
+  const centeredTop = targetTop - (list.clientHeight - targetRect.height) / 2
+  const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight)
+  list.scrollTop = Math.max(0, Math.min(maxScrollTop, centeredTop))
+  return true
+}
+function messageIsVisibleInList(messageID: number) {
+  const list = messageListRef.value
+  const target = document.getElementById(`message-${messageID}`)
+  if (!list || !target) return false
+  const listRect = list.getBoundingClientRect()
+  const targetRect = target.getBoundingClientRect()
+  return targetRect.top >= listRect.top && targetRect.bottom <= listRect.bottom
+}
+
+async function centerMessageUntilStable(messageID: number, requestIsCurrent: () => boolean) {
+  let stableFrames = 0
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    if (!requestIsCurrent() || !centerMessageInList(messageID)) return false
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    if (!requestIsCurrent()) return false
+    stableFrames = messageIsVisibleInList(messageID) ? stableFrames + 1 : 0
+    if (stableFrames >= 3) return true
+  }
+  return false
+}
+
 function updateAutoFollow() {
+  if (messageLocationActive.value) {
+    autoFollowMessages.value = false
+    return
+  }
   if ((messageListRef.value?.scrollTop || 0) < 80) void loadOlderMessages()
   autoFollowMessages.value = isNearMessageBottom()
   if (autoFollowMessages.value && selectedGroupId.value) {
@@ -709,6 +778,7 @@ function updateAutoFollow() {
 function scrollMessagesToBottom() {
   nextTick(() => {
     window.requestAnimationFrame(() => {
+      if (messageLocationActive.value) return
       const element = messageListRef.value
       if (!element) return
       element.scrollTop = element.scrollHeight
@@ -721,6 +791,15 @@ function scrollMessagesToBottom() {
 }
 
 function handleMessageMediaLoaded() {
+  if (messageLocationActive.value) {
+    const messageID = locatedMessageId.value
+    if (messageID !== null) {
+      window.requestAnimationFrame(() => {
+        if (locatedMessageId.value === messageID) centerMessageInList(messageID)
+      })
+    }
+    return
+  }
   if (autoFollowMessages.value) {
     scrollMessagesToBottom()
   }
@@ -743,7 +822,7 @@ function updateDocumentTitle() {
 }
 
 async function loadOlderMessages(triggerRemote = true) {
-  if (loadingOlder.value || messages.value.length === 0) return
+  if (messageLocationActive.value || loadingOlder.value || messages.value.length === 0) return
   olderHistoryNotice.value = ''
   if (!hasOlderMessages.value) {
     if (!triggerRemote) return
@@ -892,46 +971,100 @@ function closeRuleDialog() {
   panelError.value = ''
 }
 
-async function writeClipboardText(content: string) {
-  if (window.isSecureContext && window.navigator.clipboard?.writeText) {
-    try {
-      await window.navigator.clipboard.writeText(content)
-      return
-    } catch {
-      // 浏览器可能提供 Clipboard API，但通过权限策略拒绝当前页面使用。
-    }
-  }
-
-  const textArea = document.createElement('textarea')
-  textArea.value = content
-  textArea.setAttribute('readonly', '')
-  textArea.style.position = 'fixed'
-  textArea.style.left = '-9999px'
-  textArea.style.opacity = '0'
-  document.body.appendChild(textArea)
-  textArea.select()
-  textArea.setSelectionRange(0, content.length)
-
-  try {
-    if (!document.execCommand('copy')) throw new Error('copy command was rejected')
-  } finally {
-    textArea.remove()
-  }
-}
-
-async function copyMessageContent(message: Message) {
-  const content = message.content || ''
-  if (!content) {
-    antMessage.warning('该消息没有可复制的正文')
+async function locateMessageInContext(message: Message) {
+  const groupID = selectedGroupId.value
+  if (!groupID || String(message.groupId) !== String(groupID)) {
+    antMessage.warning('目标消息不属于当前群聊')
     return
   }
 
+  cancelMessageLocation()
+  const requestKey = `${groupID}:${message.id}`
+  const request = locateMessageRequests.begin(requestKey)
+  const requestIsCurrent = () =>
+    locateMessageRequests.isCurrent(request, requestKey) &&
+    String(selectedGroupId.value) === String(groupID)
+
+  locatingMessageId.value = message.id
+  autoFollowMessages.value = false
+  olderHistoryNotice.value = ''
+  error.value = ''
+  locationLoadingText.value = '正在加载目标消息的上下文…'
+
+  suppressKeywordSearch = true
+  window.clearTimeout(keywordSearchTimer)
+  query.value = ''
+  selectedSenderIds.value = []
+  timeRange.value = 'all'
+  customDate.value = ''
+  await nextTick()
+  window.clearTimeout(keywordSearchTimer)
+  suppressKeywordSearch = false
+
+  messages.value = []
+  hasOlderMessages.value = true
+
   try {
-    await writeClipboardText(content)
-    antMessage.success('正文已复制')
+    await refreshMessages()
+    if (!requestIsCurrent()) return
+
+    loadingOlder.value = true
+    let previousBoundary = ''
+    while (requestIsCurrent()) {
+      const currentMessages = orderedMessages.value
+      const targetIndex = currentMessages.findIndex((item) => item.id === message.id)
+      if (targetIndex >= 0 && (targetIndex >= locateContextSize || !hasOlderMessages.value)) break
+      if (!hasOlderMessages.value) break
+
+      const oldest = currentMessages[0]
+      const boundary = oldest?.sentAt || oldest?.capturedAt || ''
+      if (!boundary || boundary === previousBoundary) break
+      previousBoundary = boundary
+
+      const result = await listMessages({
+        groupId: groupID,
+        before: boundary,
+        limit: locatePageSize
+      })
+      if (!requestIsCurrent()) return
+
+      const rawItems = result.items || []
+      const merged = new Map(messages.value.map((item) => [item.id, item]))
+      for (const item of rawItems.filter(isDisplayableMessage)) merged.set(item.id, item)
+      messages.value = [...merged.values()]
+      hasOlderMessages.value = rawItems.length === locatePageSize
+    }
+
+    if (!requestIsCurrent()) return
+    if (!messages.value.some((item) => item.id === message.id)) {
+      antMessage.warning('没有在已保存的群聊记录中找到这条消息')
+      return
+    }
+
+    locationLoadingText.value = '正在滚动到目标消息…'
+    locatedMessageId.value = message.id
+    await nextTick()
+    const targetFound = await centerMessageUntilStable(message.id, requestIsCurrent)
+    if (!targetFound) {
+      antMessage.warning('消息已加载，但暂时无法滚动到目标位置')
+      return
+    }
+    autoFollowMessages.value = false
+    locatedContextMessageId.value = message.id
+    locateHighlightTimer = window.setTimeout(() => {
+      if (locatedMessageId.value === message.id) locatedMessageId.value = null
+    }, 6000)
+    antMessage.success('已定位到目标消息')
   } catch (err) {
-    console.warn('copy message content failed', err)
-    antMessage.error('复制失败，请手动复制')
+    if (!requestIsCurrent()) return
+    error.value = err instanceof Error ? err.message : String(err)
+    antMessage.error('定位消息失败')
+  } finally {
+    if (requestIsCurrent()) {
+      loadingOlder.value = false
+      locationLoadingText.value = ''
+      locatingMessageId.value = null
+    }
   }
 }
 
@@ -947,12 +1080,6 @@ async function openMessageDetails(message: Message) {
   } catch {
     // 列表数据足以展示基础详情；原始数据加载失败不阻止详情面板打开。
   }
-}
-
-async function filterByMessageSender(message: Message) {
-  selectedSenderIds.value = message.weiboSenderId ? [message.weiboSenderId] : []
-  selectedMessage.value = null
-  await applyFilters()
 }
 
 function editRule(rule: NotificationRule) {
@@ -1060,6 +1187,7 @@ function toggleManagementCenter() {
 }
 
 watch(query, () => {
+  if (suppressKeywordSearch) return
   window.clearTimeout(keywordSearchTimer)
   keywordSearchTimer = window.setTimeout(() => {
     void applyFilters()
@@ -1084,6 +1212,7 @@ onUnmounted(() => {
   olderMessageRequests.invalidate()
   historyRequests.invalidate()
   detailRequests.invalidate()
+  cancelMessageLocation()
   if (clockTimer) window.clearInterval(clockTimer)
   window.clearTimeout(keywordSearchTimer)
 })
@@ -1093,9 +1222,15 @@ onUnmounted(() => {
   <a-config-provider :theme="antTheme" :locale="zhCN">
     <main
       class="app-shell"
-      :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen }"
+      :class="{ 'with-notify': showNotifications, 'mobile-sidebar-open': mobileSidebarOpen, 'location-loading': locatingMessageId !== null }"
+      :aria-busy="locatingMessageId !== null"
       :style="{ '--sidebar-width': `${sidebarWidth}px` }"
     >
+      <div v-if="locatingMessageId !== null" class="global-location-loading" role="status" aria-live="polite">
+        <a-spin size="large" />
+        <strong>正在定位消息</strong>
+        <span>{{ locationLoadingText }}</span>
+      </div>
     <div v-if="mobileSidebarOpen" class="mobile-sidebar-backdrop" @click="mobileSidebarOpen = false"></div>
     <GroupSidebar
       v-model:group-query="groupQuery"
@@ -1179,13 +1314,13 @@ onUnmounted(() => {
         <button type="button" @click="refreshAll">重试</button>
       </div>
 
-      <div ref="messageListRef" class="message-list" @scroll.passive="updateAutoFollow">
+      <div ref="messageListRef" class="message-list" :class="{ 'message-location-active': messageLocationActive }" @scroll.passive="updateAutoFollow">
         <div class="message-content">
           <div v-if="selectedGroup && !messagesLoading" class="timeline-mark">
             {{ selectedGroup.name }} · {{ hasActiveFilters ? `找到 ${orderedMessages.length} 条` : `最近 ${orderedMessages.length} 条` }}
           </div>
 
-          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="loadingOlder || historySyncActive" @click="loadOlderMessages()">
+          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="messageLocationActive || loadingOlder || historySyncActive" @click="loadOlderMessages()">
             {{ loadOlderLabel }}
           </button>
 
@@ -1203,9 +1338,9 @@ onUnmounted(() => {
             :can-resolve-media="monitorIsFresh"
             :media-resolution-busy="mediaResolutionRequests.has(message.id)"
             :is-own="Boolean(appConfig.currentUserId) && message.weiboSenderId === appConfig.currentUserId"
+            :located="locatedMessageId === message.id"
             @details="openMessageDetails"
-            @copy="copyMessageContent"
-            @filter-sender="filterByMessageSender"
+            @locate="locateMessageInContext"
             @create-rule="startRuleFromMessage"
             @preview="previewImageURL = $event"
             @media-loaded="handleMessageMediaLoaded"

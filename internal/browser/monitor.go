@@ -260,15 +260,16 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		return err
 	}
 	if probe.Status == "page_ok" && target.WebSocketDebuggerURL != "" {
-		selectStatus, selectErr := ensureTargetGroupSelected(ctx, target.WebSocketDebuggerURL, TargetGroup{
+		var selectStatus string
+		target, probe, selectStatus, err = ensureTargetGroupSelected(ctx, opts, target, probe, TargetGroup{
 			ID:   opts.TargetGroupID,
 			Name: opts.TargetGroupName,
 		})
 		probe.GroupSelectStatus = selectStatus
-		if selectErr != nil {
-			probe.GroupSelectError = selectErr.Error()
+		if err != nil {
+			probe.GroupSelectError = err.Error()
 			stopProcess(cmd)
-			return selectErr
+			return err
 		}
 		if opts.OnPageTarget != nil {
 			opts.OnPageTarget(target.WebSocketDebuggerURL)
@@ -735,6 +736,19 @@ func capturePageScreenshot(ctx context.Context, webSocketDebuggerURL string) ([]
 	}
 	defer client.Close()
 
+	var qrRefreshed bool
+	if err := client.evaluate(captureCtx, refreshExpiredLoginQRCodeExpression, &qrRefreshed); err != nil {
+		return nil, fmt.Errorf("refresh expired login QR code: %w", err)
+	}
+	if qrRefreshed {
+		slog.Info("expired weibo login QR code refreshed")
+		select {
+		case <-captureCtx.Done():
+			return nil, captureCtx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+
 	var qr loginQRCodeTarget
 	if err := client.evaluate(captureCtx, findLoginQRCodeExpression, &qr); err != nil {
 		return nil, fmt.Errorf("locate login QR code: %w", err)
@@ -964,6 +978,32 @@ const dismissLoginOverlayExpression = `(() => {
   return true;
 })()`
 
+const refreshExpiredLoginQRCodeExpression = `(() => {
+  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const bodyText = normalize(document.body?.innerText || '');
+  const expired = bodyText.includes('二维码已过期') ||
+    bodyText.includes('二维码已失效') ||
+    bodyText.includes('二维码失效');
+  if (!expired) return false;
+  const visible = (element) => {
+    if (!(element instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      rect.width > 0 &&
+      rect.height > 0;
+  };
+  const candidates = [...document.querySelectorAll('button, [role="button"], a, div, span')];
+  const refresh = candidates.find((element) => {
+    const text = normalize(element.textContent || '');
+    return visible(element) && (text === '重新刷新' || text === '刷新二维码');
+  });
+  if (!(refresh instanceof HTMLElement)) return false;
+  refresh.click();
+  return true;
+})()`
+
 const findLoginQRCodeExpression = `(() => {
   const visible = (element) => {
     if (!(element instanceof Element)) return false;
@@ -1059,18 +1099,72 @@ func getCurrentPageProbe(ctx context.Context, port int) (chromeTarget, PageProbe
 	return target, probe
 }
 
-func ensureTargetGroupSelected(ctx context.Context, webSocketDebuggerURL string, targetGroup TargetGroup) (string, error) {
+func ensureTargetGroupSelected(
+	ctx context.Context,
+	opts MonitorOptions,
+	target chromeTarget,
+	probe PageProbe,
+	targetGroup TargetGroup,
+) (chromeTarget, PageProbe, string, error) {
 	targetConfigured := strings.TrimSpace(targetGroup.ID) != "" || strings.TrimSpace(targetGroup.Name) != ""
 	if !targetConfigured {
-		return "no_target_configured", nil
+		return target, probe, "no_target_configured", nil
 	}
+	lastProbeReportedAt := time.Now()
 	for {
-		selectStatus, selectErr := selectTargetGroup(ctx, webSocketDebuggerURL, targetGroup)
+		currentTarget, currentProbe := getCurrentPageProbe(ctx, opts.DebugPort)
+		if currentProbe.Status == "login_required" {
+			var err error
+			currentTarget, currentProbe, err = waitForAuthenticatedChatPage(ctx, opts)
+			if err != nil {
+				return target, currentProbe, "login_required", err
+			}
+			lastProbeReportedAt = time.Now()
+		}
+		if currentProbe.Status != "page_ok" || currentTarget.WebSocketDebuggerURL == "" {
+			selectStatus := "page_not_ready:" + currentProbe.Status
+			currentProbe.GroupSelectStatus = selectStatus
+			if time.Since(lastProbeReportedAt) >= opts.HealthCheckInterval {
+				reportPageProbe(ctx, opts, currentProbe)
+				lastProbeReportedAt = time.Now()
+			}
+			target = currentTarget
+			probe = currentProbe
+			slog.Info("chat page not ready while selecting target group; retrying",
+				"status", currentProbe.Status,
+				"error", currentProbe.Error,
+				"retryIn", "3s",
+			)
+			select {
+			case <-ctx.Done():
+				return target, probe, selectStatus, ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			continue
+		}
+
+		target = currentTarget
+		probe = currentProbe
+		selectCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		selectStatus, selectErr := selectTargetGroup(selectCtx, target.WebSocketDebuggerURL, targetGroup)
+		cancel()
+		probe.GroupSelectStatus = selectStatus
+		if selectErr != nil {
+			probe.GroupSelectError = selectErr.Error()
+		}
 		if selectErr == nil && (strings.HasPrefix(selectStatus, "clicked") || strings.HasPrefix(selectStatus, "already_selected")) {
 			if strings.HasPrefix(selectStatus, "clicked") {
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return target, probe, selectStatus, ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
 			}
-			return selectStatus, nil
+			return target, probe, selectStatus, nil
+		}
+		if time.Since(lastProbeReportedAt) >= opts.HealthCheckInterval {
+			reportPageProbe(ctx, opts, probe)
+			lastProbeReportedAt = time.Now()
 		}
 		errorText := ""
 		if selectErr != nil {
@@ -1079,7 +1173,7 @@ func ensureTargetGroupSelected(ctx context.Context, webSocketDebuggerURL string,
 		slog.Info("target group not ready; retrying", "status", selectStatus, "error", errorText, "retryIn", "3s")
 		select {
 		case <-ctx.Done():
-			return selectStatus, ctx.Err()
+			return target, probe, selectStatus, ctx.Err()
 		case <-time.After(3 * time.Second):
 		}
 	}
@@ -1245,6 +1339,12 @@ const embeddedLoginDetectionExpression = `(() => {
   if (visible(qr)) return true;
   const login = document.querySelector('.login, [class*="login" i]');
   const text = String(login?.innerText || document.body?.innerText || '');
+  const bodyText = String(document.body?.innerText || '');
+  if (bodyText.includes('二维码已过期') ||
+      bodyText.includes('二维码已失效') ||
+      bodyText.includes('二维码失效')) {
+    return true;
+  }
   return visible(login) &&
     (text.includes('用微博手机版扫描登录聊天') || text.includes('扫描登录'));
 })()`

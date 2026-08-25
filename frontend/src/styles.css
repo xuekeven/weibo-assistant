@@ -46,6 +46,36 @@ button {
   overflow: hidden;
   background: #f2f4f5;
 }
+.global-location-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(248, 250, 251, 0.9);
+  color: #24303a;
+  cursor: wait;
+  pointer-events: auto;
+}
+
+.global-location-loading strong {
+  margin-top: 4px;
+  font-size: 16px;
+}
+
+.global-location-loading span {
+  color: #687681;
+  font-size: 13px;
+}
+
+.app-shell.location-loading > :not(.global-location-loading) {
+  pointer-events: none;
+  user-select: none;
+}
+
 
 .app-shell.with-notify {
   grid-template-columns: 280px minmax(0, 1fr);
@@ -1131,6 +1161,10 @@ button:disabled {
   gap: 0;
   padding: 20px clamp(18px, 4vw, 64px) 28px;
 }
+.message-list.message-location-active {
+  overflow-anchor: none;
+}
+
 
 .message-content {
   display: flex;
@@ -1142,6 +1176,14 @@ button:disabled {
 
 .message-row {
   width: 100%;
+}
+
+.message-row.located-message {
+  border-radius: 10px;
+  outline: 2px solid #17785d;
+  outline-offset: 6px;
+  background: rgba(23, 120, 93, 0.08);
+  scroll-margin-block: 96px;
 }
 
 .message-row.own-message {
