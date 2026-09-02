@@ -20,6 +20,7 @@ type WeworkClient struct {
 	// client 设置统一超时，避免第三方服务无响应时永久占住 outbox worker。
 	baseURL string
 	apiKey  string
+	app     string
 	toUser  string
 	client  *http.Client
 }
@@ -30,10 +31,11 @@ type SendResponse struct {
 	MediaID string `json:"media_id,omitempty"`
 }
 
-func NewWeworkClient(baseURL, apiKey, toUser string) *WeworkClient {
+func NewWeworkClient(baseURL, apiKey, app, toUser string) *WeworkClient {
 	return &WeworkClient{
 		baseURL: baseURL,
 		apiKey:  apiKey,
+		app:     app,
 		toUser:  toUser,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
@@ -63,6 +65,9 @@ func (c *WeworkClient) SendText(ctx context.Context, content string) (SendRespon
 
 func (c *WeworkClient) SendTextWithIdempotency(ctx context.Context, content string, idempotencyKey string) (SendResponse, error) {
 	payload := map[string]string{"content": environmentTextPrefix(runtime.GOOS) + content}
+	if c.app != "" {
+		payload["app"] = c.app
+	}
 	if c.toUser != "" {
 		payload["touser"] = c.toUser
 	}
@@ -119,6 +124,11 @@ func (c *WeworkClient) SendImageBytes(ctx context.Context, filename string, imag
 	}
 	if _, err := part.Write(image); err != nil {
 		return SendResponse{}, err
+	}
+	if c.app != "" {
+		if err := writer.WriteField("app", c.app); err != nil {
+			return SendResponse{}, err
+		}
 	}
 	if c.toUser != "" {
 		if err := writer.WriteField("touser", c.toUser); err != nil {

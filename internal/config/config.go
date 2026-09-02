@@ -44,6 +44,7 @@ type Config struct {
 	// 企业微信通知与 outbox worker 配置。
 	WeworkRelayURL           string
 	WeworkRelayAPIKey        string
+	WeworkRelayApp           string
 	WeworkRelayToUser        string
 	NotificationPollInterval time.Duration
 	NotificationMaxAttempts  int
@@ -105,6 +106,7 @@ func Load(envPath string) (Config, error) {
 		TargetSenderID:           getString("TARGET_SENDER_ID", ""),
 		WeworkRelayURL:           strings.TrimRight(getString("WEWORK_RELAY_URL", "http://aliserver.tailed5977.ts.net:5001"), "/"),
 		WeworkRelayAPIKey:        getString("WEWORK_RELAY_API_KEY", ""),
+		WeworkRelayApp:           getString("WEWORK_RELAY_APP", ""),
 		WeworkRelayToUser:        getString("WEWORK_RELAY_TOUSER", ""),
 		NotificationPollInterval: time.Duration(readInt("NOTIFICATION_POLL_INTERVAL_MS", 1000)) * time.Millisecond,
 		NotificationMaxAttempts:  readInt("NOTIFICATION_MAX_ATTEMPTS", 8),

@@ -62,6 +62,18 @@ func TestLoadHealthCheckIntervalUsesSeconds(t *testing.T) {
 	}
 }
 
+func TestLoadWeworkRelayApp(t *testing.T) {
+	t.Setenv("WEWORK_RELAY_APP", "message")
+
+	cfg, err := Load("testdata/does-not-exist.env")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.WeworkRelayApp != "message" {
+		t.Fatalf("expected message relay app, got %q", cfg.WeworkRelayApp)
+	}
+}
+
 func TestLoadDefaultsToSixHourPageReloadAndCPUAlertThresholds(t *testing.T) {
 	t.Setenv("PAGE_RELOAD_INTERVAL_MINUTES", "")
 	t.Setenv("CPU_POWER_ALERT_WATTS", "")

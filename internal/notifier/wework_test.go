@@ -17,7 +17,7 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 }
 
 func TestSendTextWithIdempotencyHeader(t *testing.T) {
-	client := NewWeworkClient("http://wework.test", "secret", "")
+	client := NewWeworkClient("http://wework.test", "secret", "message", "")
 	client.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if got := request.Header.Get("Idempotency-Key"); got != "weibo-outbox-42" {
 			t.Fatalf("Idempotency-Key = %q", got)
@@ -28,6 +28,9 @@ func TestSendTextWithIdempotencyHeader(t *testing.T) {
 		}
 		if want := environmentTextPrefix(runtime.GOOS) + "hello"; payload["content"] != want {
 			t.Fatalf("content = %q, want %q", payload["content"], want)
+		}
+		if payload["app"] != "message" {
+			t.Fatalf("app = %q, want message", payload["app"])
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -58,7 +61,7 @@ func TestEnvironmentTextPrefix(t *testing.T) {
 }
 
 func TestSendImageBytesUsesRelayMultipartContract(t *testing.T) {
-	client := NewWeworkClient("http://wework.test", "secret", "XueKai")
+	client := NewWeworkClient("http://wework.test", "secret", "message", "XueKai")
 	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01}
 	client.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if got := request.Header.Get("Authorization"); got != "Bearer secret" {
@@ -70,6 +73,7 @@ func TestSendImageBytesUsesRelayMultipartContract(t *testing.T) {
 		}
 
 		var mediaFound bool
+		var appFound bool
 		var touserFound bool
 		for {
 			part, err := reader.NextPart()
@@ -100,10 +104,15 @@ func TestSendImageBytesUsesRelayMultipartContract(t *testing.T) {
 				if string(body) != "XueKai" {
 					t.Fatalf("touser = %q", string(body))
 				}
+			case "app":
+				appFound = true
+				if string(body) != "message" {
+					t.Fatalf("app = %q", string(body))
+				}
 			}
 		}
-		if !mediaFound || !touserFound {
-			t.Fatalf("multipart fields media=%v touser=%v", mediaFound, touserFound)
+		if !mediaFound || !appFound || !touserFound {
+			t.Fatalf("multipart fields media=%v app=%v touser=%v", mediaFound, appFound, touserFound)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,

@@ -31,7 +31,7 @@ func RunServer(ctx context.Context, cfg config.Config) error {
 	if err := migrate.Apply(ctx, st); err != nil {
 		return err
 	}
-	notify := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
+	notify := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayApp, cfg.WeworkRelayToUser)
 	api := httpapi.NewServer(cfg, st, notify)
 	frontend, err := frontendFileHandler(cfg.FrontendDistDir)
 	if err != nil {
@@ -126,7 +126,7 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 	}()
 	imageURLByFID := newImageURLCache(cfg.ImageCacheTTL, cfg.ImageCacheMaxItems)
 	weworkEnabled := strings.TrimSpace(cfg.WeworkRelayURL) != "" && strings.TrimSpace(cfg.WeworkRelayAPIKey) != ""
-	weworkClient := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayToUser)
+	weworkClient := notifier.NewWeworkClient(cfg.WeworkRelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayApp, cfg.WeworkRelayToUser)
 	loginAlerts := newLoginAlertSender(
 		weworkClient,
 		weworkEnabled,
@@ -255,6 +255,11 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			metrics.persistSuccess.Add(1)
 			if !result.Created {
 				metrics.dedupeTotal.Add(1)
+			}
+			if strings.EqualFold(strings.TrimSpace(result.Message.MessageType), "image") {
+				if _, err := st.EnqueueMediaResolutionForMessage(messageCtx, result.Message.ID); err != nil {
+					slog.Warn("enqueue realtime image resolution failed", "messageID", result.Message.ID, "error", err)
+				}
 			}
 			if err := st.MarkMonitorMessage(messageCtx); err != nil {
 				slog.Warn("update monitor last message time failed", "error", err)
@@ -492,8 +497,21 @@ func runNotificationWorker(ctx context.Context, cfg config.Config, st *store.Sto
 			continue
 		}
 
-		client := notifier.NewWeworkClient(job.RelayURL, cfg.WeworkRelayAPIKey, job.ToUser)
-		response, sendErr := client.SendTextWithIdempotency(ctx, job.Content, fmt.Sprintf("weibo-outbox-%d", job.ID))
+		message, loadErr := st.GetMessageByID(ctx, job.MessageID, false)
+		client := notifier.NewWeworkClient(job.RelayURL, cfg.WeworkRelayAPIKey, cfg.WeworkRelayApp, job.ToUser)
+		var response notifier.SendResponse
+		var sendErr error
+		if loadErr != nil {
+			sendErr = fmt.Errorf("load notification message: %w", loadErr)
+		} else if job.TextSentAt == nil {
+			response, sendErr = client.SendTextWithIdempotency(ctx, job.Content, fmt.Sprintf("weibo-outbox-%d", job.ID))
+			if sendErr == nil {
+				sendErr = st.MarkNotificationOutboxTextSent(ctx, job.ID)
+			}
+		}
+		if sendErr == nil && strings.EqualFold(strings.TrimSpace(message.MessageType), "image") {
+			response, sendErr = sendNotificationImages(ctx, cfg, st, client, message, job)
+		}
 		if sendErr == nil {
 			if err := st.MarkNotificationOutboxSent(ctx, job.ID); err != nil {
 				slog.Error("mark notification outbox sent failed", "jobID", job.ID, "error", err)
@@ -594,6 +612,12 @@ func buildTargetNotificationContent(message store.Message) string {
 	} else if !message.CapturedAt.IsZero() {
 		sentAt = message.CapturedAt.Format("1月2日15点04分")
 	}
+	if strings.EqualFold(strings.TrimSpace(message.MessageType), "image") {
+		return fmt.Sprintf("@%s 在%s在群里发图片：",
+			fallbackText(message.SenderName, message.WeiboSenderID),
+			sentAt,
+		)
+	}
 	content := strings.TrimSpace(message.Content)
 	if content == "" {
 		content = fmt.Sprintf("[%s]", message.MessageType)
@@ -620,6 +644,7 @@ func truncateRunes(value string, limit int) string {
 func recordNotificationEvent(ctx context.Context, st *store.Store, cfg config.Config, message store.Message, status string, response *notifier.SendResponse, errorMessage string) {
 	requestPayload, _ := json.Marshal(map[string]string{
 		"content": buildTargetNotificationContent(message),
+		"app":     cfg.WeworkRelayApp,
 		"touser":  cfg.WeworkRelayToUser,
 	})
 	responsePayload, _ := json.Marshal(response)

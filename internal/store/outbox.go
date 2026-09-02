@@ -18,14 +18,16 @@ type EnqueueNotificationParams struct {
 }
 
 type NotificationOutboxJob struct {
-	ID           int64
-	RuleID       *int64
-	MessageID    int64
-	Content      string
-	RelayURL     string
-	ToUser       string
-	AttemptCount int
-	MaxAttempts  int
+	ID             int64
+	RuleID         *int64
+	MessageID      int64
+	Content        string
+	RelayURL       string
+	ToUser         string
+	AttemptCount   int
+	MaxAttempts    int
+	TextSentAt     *time.Time
+	ImageSentCount int
 }
 
 type NotificationOutboxItem struct {
@@ -167,7 +169,9 @@ func (s *Store) ClaimNotificationOutbox(ctx context.Context, staleAfter time.Dur
 		          o.relay_url,
 		          coalesce(o.touser, ''),
 		          o.attempt_count,
-		          o.max_attempts
+		          o.max_attempts,
+		          o.text_sent_at,
+		          o.image_sent_count
 	`, staleAfter.Milliseconds()).Scan(
 		&job.ID,
 		&job.RuleID,
@@ -177,6 +181,8 @@ func (s *Store) ClaimNotificationOutbox(ctx context.Context, staleAfter time.Dur
 		&job.ToUser,
 		&job.AttemptCount,
 		&job.MaxAttempts,
+		&job.TextSentAt,
+		&job.ImageSentCount,
 	)
 	if err != nil {
 		return NotificationOutboxJob{}, err
@@ -194,6 +200,38 @@ func (s *Store) MarkNotificationOutboxSent(ctx context.Context, id int64) error 
 		       sent_at = now(),
 		       locked_at = null,
 		       last_error = null,
+		       updated_at = now()
+		 where id = $1 and status = 'sending'
+	`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) MarkNotificationOutboxTextSent(ctx context.Context, id int64) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		update notification_outbox
+		   set text_sent_at = coalesce(text_sent_at, now()),
+		       updated_at = now()
+		 where id = $1 and status = 'sending'
+	`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) MarkNotificationOutboxImageSent(ctx context.Context, id int64) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		update notification_outbox
+		   set image_sent_count = image_sent_count + 1,
 		       updated_at = now()
 		 where id = $1 and status = 'sending'
 	`, id)

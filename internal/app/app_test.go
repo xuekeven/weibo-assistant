@@ -25,6 +25,7 @@ func TestSystemMessageDoesNotMatchTargetSender(t *testing.T) {
 		TargetSenderID:          "1401527553",
 		WeworkRelayURL:          "https://relay.example.test/send",
 		WeworkRelayAPIKey:       "test-key",
+		WeworkRelayApp:          "message",
 		WeworkRelayToUser:       "XueKai",
 		NotificationMaxAttempts: 3,
 	}, browser.NetworkMessage{
@@ -68,7 +69,7 @@ func TestBuildTargetNotificationContentFallbacks(t *testing.T) {
 		CapturedAt:    capturedAt,
 	})
 
-	want := "@1401527553 在7月9日08点05分在群里发消息：\n[image]"
+	want := "@1401527553 在7月9日08点05分在群里发图片："
 	if content != want {
 		t.Fatalf("notification content mismatch\nwant: %q\n got: %q", want, content)
 	}
