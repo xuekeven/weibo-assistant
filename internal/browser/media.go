@@ -53,11 +53,16 @@ func FetchAuthenticatedImage(ctx context.Context, debugPort int, rawURL string, 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, "", fmt.Errorf("Weibo image returned HTTP %d", response.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	var data []byte
+	if maxBytes > 0 {
+		data, err = io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	} else {
+		data, err = io.ReadAll(response.Body)
+	}
 	if err != nil {
 		return nil, "", err
 	}
-	if int64(len(data)) > maxBytes {
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
 		return nil, "", errors.New("Weibo image is too large")
 	}
 	contentType := http.DetectContentType(data)
@@ -105,10 +110,39 @@ func convertHEICToJPEG(ctx context.Context, data []byte, maxBytes int64) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("read converted image: %w", err)
 	}
-	if int64(len(converted)) > maxBytes {
+	if maxBytes > 0 && int64(len(converted)) > maxBytes {
 		return nil, errors.New("converted image is too large")
 	}
 	return converted, nil
+}
+
+// OriginalWeiboImageURL converts the thumbnail URLs returned by Weibo's
+// metadata API into the authenticated original-image endpoint. Other URLs are
+// returned unchanged.
+func OriginalWeiboImageURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return strings.TrimSpace(rawURL)
+	}
+	if !strings.HasSuffix(parsed.Path, "/msget_thumbnail") && !strings.HasSuffix(parsed.Path, "/msget") {
+		return strings.TrimSpace(rawURL)
+	}
+	fid := strings.TrimSpace(parsed.Query().Get("fid"))
+	if fid == "" {
+		return strings.TrimSpace(rawURL)
+	}
+	source := strings.TrimSpace(parsed.Query().Get("source"))
+	if source == "" {
+		source = "209678993"
+	}
+	parsed.Path = "/2/mss/msget"
+	query := url.Values{}
+	query.Set("fid", fid)
+	query.Set("source", source)
+	query.Set("imageType", "origin")
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 const imageMetadataEndpoint = "https://upload.api.weibo.com/2/mss/meta_query.json"

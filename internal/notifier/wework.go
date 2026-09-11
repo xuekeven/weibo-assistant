@@ -38,7 +38,7 @@ func NewWeworkClient(baseURL, apiKey, app, toUser string) *WeworkClient {
 		app:     app,
 		toUser:  toUser,
 		client: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: 2 * time.Minute,
 		},
 	}
 }

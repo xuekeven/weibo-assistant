@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,8 +15,6 @@ import (
 	"github.com/xuekeven/weibo-assistant/internal/notifier"
 	"github.com/xuekeven/weibo-assistant/internal/store"
 )
-
-const notificationImageMaxBytes int64 = 10 << 20
 
 func sendNotificationImages(ctx context.Context, cfg config.Config, st *store.Store, client *notifier.WeworkClient, message store.Message, job store.NotificationOutboxJob) (notifier.SendResponse, error) {
 	imageCount := 0
@@ -67,7 +64,8 @@ func readNotificationImage(ctx context.Context, cfg config.Config, attachment st
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
 		return nil, "", fmt.Errorf("invalid image URL")
 	}
-	image, contentType, err := browser.FetchAuthenticatedImage(ctx, cfg.ChromeDebugPort, parsed.String(), notificationImageMaxBytes)
+	originalURL := browser.OriginalWeiboImageURL(parsed.String())
+	image, contentType, err := browser.FetchAuthenticatedImage(ctx, cfg.ChromeDebugPort, originalURL, 0)
 	if err != nil {
 		return nil, "", err
 	}
@@ -78,22 +76,9 @@ func readNotificationImage(ctx context.Context, cfg config.Config, attachment st
 }
 
 func readNotificationImageFile(path string) ([]byte, string, error) {
-	file, err := os.Open(path)
+	image, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", err
-	}
-	defer file.Close()
-	if info, err := file.Stat(); err != nil {
-		return nil, "", err
-	} else if info.Size() > notificationImageMaxBytes {
-		return nil, "", fmt.Errorf("image is too large")
-	}
-	image, err := io.ReadAll(io.LimitReader(file, notificationImageMaxBytes+1))
-	if err != nil {
-		return nil, "", err
-	}
-	if int64(len(image)) > notificationImageMaxBytes {
-		return nil, "", fmt.Errorf("image is too large")
 	}
 	contentType := http.DetectContentType(image)
 	if err := validateNotificationImage(image, contentType); err != nil {

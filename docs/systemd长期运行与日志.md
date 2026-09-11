@@ -205,6 +205,10 @@ chmod 700 ~/repos/weibo-assistant/.weibo-profile
 
 如果没有收到二维码，检查 `WEWORK_RELAY_API_KEY`、`WEWORK_RELAY_TOUSER` 和 monitor 日志。登录提醒发送失败时，monitor 保持运行并每分钟重试尚未成功的消息。未登录期间每隔 `LOGIN_QR_REFRESH_SECONDS` 重新读取二维码：二维码未变化时不重复发送，过期刷新为新二维码后会重新发送图片；文字提示在本次未登录期间只发送一次。
 
+普通微博图片通知会把 `/msget_thumbnail` 转换为带 `imageType=origin` 的 `/msget` 原图地址，
+使用登录态下载完整字节后直接提交给 `wework-send`。本项目不按文件大小压缩或拒绝图片；
+企微图片、文件及文字降级策略由中转服务统一决定。
+
 monitor 进入监控主循环时发送“微博群聊monitor已开启”，正常停止或从可捕获的运行错误退出时发送“微博群聊monitor已关闭”。关闭通知使用独立的 20 秒超时，不受主进程取消信号影响；`SIGKILL`、主机断电和操作系统崩溃无法发送退出通知。
 
 ## 安装 systemd 服务

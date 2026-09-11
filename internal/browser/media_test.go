@@ -51,3 +51,41 @@ func TestNewImageMetadataHTTPErrorFallsBackToStatus(t *testing.T) {
 		t.Fatalf("unexpected error: %s", got)
 	}
 }
+
+func TestOriginalWeiboImageURLUsesOriginEndpoint(t *testing.T) {
+	raw := "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=5321448476379671&high=240&width=240&size=192,240"
+	got := OriginalWeiboImageURL(raw)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Path != "/2/mss/msget" {
+		t.Fatalf("path = %q, want original endpoint", parsed.Path)
+	}
+	query := parsed.Query()
+	if query.Get("fid") != "5321448476379671" || query.Get("source") != "209678993" || query.Get("imageType") != "origin" {
+		t.Fatalf("unexpected original query: %v", query)
+	}
+	if query.Has("size") || query.Has("width") || query.Has("high") {
+		t.Fatalf("thumbnail dimensions leaked into original URL: %v", query)
+	}
+}
+
+func TestOriginalWeiboImageURLPreservesSource(t *testing.T) {
+	raw := "https://upload.api.weibo.com/2/mss/msget?fid=42&source=custom&imageType=small"
+	got := OriginalWeiboImageURL(raw)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("source") != "custom" || parsed.Query().Get("imageType") != "origin" {
+		t.Fatalf("unexpected original query: %v", parsed.Query())
+	}
+}
+
+func TestOriginalWeiboImageURLLeavesOtherURLsUnchanged(t *testing.T) {
+	raw := "https://example.com/photo.jpg?width=240"
+	if got := OriginalWeiboImageURL(raw); got != raw {
+		t.Fatalf("got %q, want %q", got, raw)
+	}
+}
