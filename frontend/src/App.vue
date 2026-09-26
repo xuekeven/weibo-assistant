@@ -22,6 +22,7 @@ import {
   getHistorySync,
   getReadiness,
   getMonitorStatus,
+  refreshMonitorLoginQRCode,
   listGroups,
   listMessages,
   listNotificationEvents,
@@ -85,6 +86,9 @@ const editingRuleId = ref<number | null>(null)
 const ruleDialogOpen = ref(false)
 const panelError = ref('')
 const previewImageURL = ref('')
+const loginQRCodeURL = ref('')
+const loginQRCodeOpen = ref(false)
+const loginQRCodeLoading = ref(false)
 const exportingMessages = ref(false)
 const exportError = ref('')
 const monitorExpanded = ref(true)
@@ -152,7 +156,7 @@ const monitorStatusItems = [
   {
     key: 'login_required',
     label: '等待微博扫码登录',
-    description: '请查看企业微信中的登录提示和二维码截图；扫码成功后会自动恢复监听。'
+    description: '可点击异常提示中的“登录”刷新二维码；扫码成功后会自动恢复监听。'
   },
   {
     key: 'monitor_starting',
@@ -229,6 +233,27 @@ const monitorAlertMessage = computed(() => {
   if (monitor.value?.lastError) return monitor.value.lastError
   return '开发环境请查看运行 monitor 命令的终端日志；systemd 部署时查看 logs/monitor.log。'
 })
+
+async function openLoginQRCode() {
+  if (loginQRCodeLoading.value) return
+  loginQRCodeLoading.value = true
+  try {
+    const image = await refreshMonitorLoginQRCode()
+    if (loginQRCodeURL.value) URL.revokeObjectURL(loginQRCodeURL.value)
+    loginQRCodeURL.value = URL.createObjectURL(image)
+    loginQRCodeOpen.value = true
+  } catch (err) {
+    antMessage.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    loginQRCodeLoading.value = false
+  }
+}
+
+function releaseLoginQRCode() {
+  if (!loginQRCodeURL.value) return
+  URL.revokeObjectURL(loginQRCodeURL.value)
+  loginQRCodeURL.value = ''
+}
 
 const monitorHeartbeatLabel = computed(() => {
   const value = monitor.value?.lastHeartbeatAt || monitor.value?.updatedAt
@@ -1215,6 +1240,7 @@ onUnmounted(() => {
   cancelMessageLocation()
   if (clockTimer) window.clearInterval(clockTimer)
   window.clearTimeout(keywordSearchTimer)
+  releaseLoginQRCode()
 })
 </script>
 
@@ -1304,6 +1330,15 @@ onUnmounted(() => {
       <div v-if="monitor && (!monitorIsFresh || monitor.lastError)" class="monitor-alert" role="alert">
         <strong>{{ monitorIsFresh ? '监控报告了异常' : '监控心跳已过期' }}</strong>
         <span>{{ monitorAlertMessage }}</span>
+        <button
+          v-if="monitorIsFresh && monitor.status === 'login_required'"
+          class="monitor-login-button"
+          type="button"
+          :disabled="loginQRCodeLoading"
+          @click="openLoginQRCode"
+        >
+          {{ loginQRCodeLoading ? '正在刷新…' : '登录' }}
+        </button>
       </div>
 
       <div v-if="error" class="error-line" role="alert">
@@ -1420,6 +1455,20 @@ onUnmounted(() => {
       :events="selectedMessageNotifications"
       @close="selectedMessage = null"
     />
+
+    <a-modal
+      v-model:open="loginQRCodeOpen"
+      title="微博扫码登录"
+      :footer="null"
+      :width="420"
+      centered
+      @after-close="releaseLoginQRCode"
+    >
+      <div class="login-qr-dialog">
+        <img v-if="loginQRCodeURL" :src="loginQRCodeURL" alt="微博登录二维码" />
+        <p>请使用微博 App 扫描二维码。登录成功后 monitor 会自动恢复群聊监听。</p>
+      </div>
+    </a-modal>
 
     <div v-if="previewImageURL" class="image-preview" role="dialog" aria-modal="true" aria-label="图片预览" @click="previewImageURL = ''">
       <button type="button" aria-label="关闭图片预览" @click="previewImageURL = ''">×</button>

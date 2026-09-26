@@ -71,6 +71,8 @@ type LoginRequiredEvent struct {
 	ScreenshotPNG []byte
 }
 
+var ErrLoginNotRequired = errors.New("Weibo login is not required")
+
 type PageProbe struct {
 	Status            string
 	URL               string
@@ -822,6 +824,47 @@ func capturePageScreenshot(ctx context.Context, webSocketDebuggerURL string) ([]
 		"bytes", len(screenshot),
 	)
 	return screenshot, nil
+}
+
+// RefreshLoginPageAndCaptureQRCode reloads the page owned by the monitor and
+// returns the newly rendered login QR code. The status check prevents this
+// server-side CDP entry point from reloading an authenticated chat page.
+func RefreshLoginPageAndCaptureQRCode(ctx context.Context, port int) ([]byte, error) {
+	target, probe := getCurrentPageProbe(ctx, port)
+	if probe.Status != "login_required" {
+		return nil, ErrLoginNotRequired
+	}
+	if target.WebSocketDebuggerURL == "" {
+		return nil, errors.New("Weibo login page target is unavailable")
+	}
+	if err := reloadPage(ctx, target.WebSocketDebuggerURL); err != nil {
+		return nil, fmt.Errorf("reload Weibo login page: %w", err)
+	}
+
+	deadline := time.Now().Add(12 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+
+		currentTarget, currentProbe := getCurrentPageProbe(ctx, port)
+		if currentProbe.Status != "login_required" || currentTarget.WebSocketDebuggerURL == "" {
+			lastErr = errors.New("Weibo login page is still loading")
+			continue
+		}
+		image, err := capturePageScreenshot(ctx, currentTarget.WebSocketDebuggerURL)
+		if err == nil {
+			return image, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("Weibo login QR code did not become ready")
+	}
+	return nil, fmt.Errorf("capture refreshed Weibo login QR code: %w", lastErr)
 }
 
 func readPageImageResource(ctx context.Context, client *cdpClient, source string) ([]byte, error) {

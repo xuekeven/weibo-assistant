@@ -184,6 +184,7 @@ sudo systemctl restart weibo-assistant-server.service \
 | `GET /metrics` | Prometheus 指标 |
 | `GET /api/media/image` | 通过已登录微博会话代理聊天图片，HEIC 自动转换为 JPEG |
 | `GET /api/monitor/status` | monitor、登录态和最后消息状态 |
+| `POST /api/monitor/login-qr` | 重载 monitor 登录页并返回最新登录二维码 PNG；仅在登录失效时可用 |
 | `GET /api/groups` | 群聊列表 |
 | `GET /api/messages` | 消息列表 |
 | `GET/POST /api/groups/{id}/history-sync` | 查询或创建消息回溯任务 |

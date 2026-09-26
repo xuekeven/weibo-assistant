@@ -325,6 +325,37 @@ export function getMonitorStatus() {
   return request<MonitorStatus>('/api/monitor/status')
 }
 
+export async function refreshMonitorLoginQRCode() {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(`${API_BASE}/api/monitor/login-qr`, {
+      method: 'POST',
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      let errorMessage = text
+      try {
+        errorMessage = (JSON.parse(text) as { error?: string }).error || text
+      } catch {
+        // 非 JSON 错误响应直接展示原始文本。
+      }
+      if (response.status === 409) errorMessage = '微博当前不需要登录，请刷新页面查看最新状态'
+      if (response.status >= 500) errorMessage = '刷新微博登录页面失败，请稍后重试'
+      throw new Error(errorMessage || `获取登录二维码失败（HTTP ${response.status}）`)
+    }
+    return response.blob()
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('刷新微博登录页面超时', { cause: err })
+    }
+    throw err
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
 export function getAppConfig() {
   return request<AppConfig>('/api/config')
 }

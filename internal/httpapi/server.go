@@ -26,24 +26,26 @@ import (
 
 type Server struct {
 	// Server 持有所有路由共享的依赖，作用类似前端应用中的全局 service 容器。
-	cfg          config.Config
-	store        *store.Store
-	notifier     *notifier.WeworkClient
-	mux          *http.ServeMux
-	wsHub        *websocketHub
-	avatarClient *http.Client
-	imageFetcher func(context.Context, int, string, int64) ([]byte, string, error)
+	cfg            config.Config
+	store          *store.Store
+	notifier       *notifier.WeworkClient
+	mux            *http.ServeMux
+	wsHub          *websocketHub
+	avatarClient   *http.Client
+	imageFetcher   func(context.Context, int, string, int64) ([]byte, string, error)
+	loginQRFetcher func(context.Context, int) ([]byte, error)
 }
 
 func NewServer(cfg config.Config, st *store.Store, notify *notifier.WeworkClient) *Server {
 	s := &Server{
-		cfg:          cfg,
-		store:        st,
-		notifier:     notify,
-		mux:          http.NewServeMux(),
-		wsHub:        newWebsocketHub(),
-		avatarClient: newAvatarHTTPClient(),
-		imageFetcher: browser.FetchAuthenticatedImage,
+		cfg:            cfg,
+		store:          st,
+		notifier:       notify,
+		mux:            http.NewServeMux(),
+		wsHub:          newWebsocketHub(),
+		avatarClient:   newAvatarHTTPClient(),
+		imageFetcher:   browser.FetchAuthenticatedImage,
+		loginQRFetcher: browser.RefreshLoginPageAndCaptureQRCode,
 	}
 	s.routes()
 	return s
@@ -89,6 +91,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/notification-outbox", s.handleListNotificationOutbox)
 	s.mux.HandleFunc("POST /api/notification-outbox/{id}/retry", s.handleRetryNotificationOutbox)
 	s.mux.HandleFunc("GET /api/monitor/status", s.handleMonitorStatus)
+	s.mux.HandleFunc("POST /api/monitor/login-qr", s.handleMonitorLoginQR)
 	s.mux.HandleFunc("GET /api/ws", s.handleWebSocket)
 	s.mux.HandleFunc("GET /api/notify/probe", s.handleNotifyProbe)
 	if strings.EqualFold(strings.TrimSpace(s.cfg.AppEnv), "development") {
@@ -152,6 +155,23 @@ func (s *Server) handleMonitorStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.monitorStatusView(status))
+}
+
+func (s *Server) handleMonitorLoginQR(w http.ResponseWriter, r *http.Request) {
+	data, err := s.loginQRFetcher(r.Context(), s.cfg.ChromeDebugPort)
+	if errors.Is(err, browser.ErrLoginNotRequired) {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 type monitorStatusView struct {

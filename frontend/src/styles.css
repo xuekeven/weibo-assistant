@@ -1667,6 +1667,50 @@ button:disabled {
   font-size: 12px;
 }
 
+.monitor-login-button {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 2px 13px;
+  border: 1px solid #c94a40;
+  border-radius: 6px;
+  background: #fff;
+  color: #a52d25;
+  font-weight: 600;
+}
+
+.monitor-login-button:hover:not(:disabled) {
+  background: #ffe8e5;
+}
+
+.monitor-login-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.login-qr-dialog {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 16px;
+  padding: 12px 8px 4px;
+  text-align: center;
+}
+
+.login-qr-dialog img {
+  width: min(300px, 75vw);
+  height: min(300px, 75vw);
+  border: 1px solid #e0e5e8;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.login-qr-dialog p {
+  margin: 0;
+  color: #687681;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .bubble .mention {
   color: #0f6f91;
   font-weight: 600;

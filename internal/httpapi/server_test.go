@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xuekeven/weibo-assistant/internal/browser"
 	"github.com/xuekeven/weibo-assistant/internal/config"
 	"github.com/xuekeven/weibo-assistant/internal/store"
 )
@@ -177,6 +179,45 @@ func TestMonitorFreshness(t *testing.T) {
 	fresh, age = monitorFreshness(store.MonitorStatus{}, now, time.Minute)
 	if fresh || age != -1 {
 		t.Fatalf("missing heartbeat should be stale: fresh=%v age=%d", fresh, age)
+	}
+}
+
+func TestMonitorLoginQRReturnsPNG(t *testing.T) {
+	server := NewServer(config.Config{AppEnv: "production", ChromeDebugPort: 9333}, nil, nil)
+	server.loginQRFetcher = func(_ context.Context, port int) ([]byte, error) {
+		if port != 9333 {
+			t.Fatalf("port = %d, want 9333", port)
+		}
+		return []byte("png-data"), nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/monitor/login-qr", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "png-data" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+}
+
+func TestMonitorLoginQRRejectsAuthenticatedPage(t *testing.T) {
+	server := NewServer(config.Config{AppEnv: "production"}, nil, nil)
+	server.loginQRFetcher = func(context.Context, int) ([]byte, error) {
+		return nil, browser.ErrLoginNotRequired
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/monitor/login-qr", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
 	}
 }
 
