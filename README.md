@@ -15,14 +15,14 @@
 
 ## 主要功能
 
-- 持久化微博登录态；登录失效时通过企业微信发送登录二维码，扫码后自动恢复监听。
+- 持久化微博登录态；登录失效时通过企业微信发送二维码，也可在网页异常提示中点击“登录”刷新并展示二维码，扫码后自动恢复监听。
 - 实时解析群聊文本和图片消息，补全图片地址并统一入库；受保护图片由后端使用微博登录态代理，HEIC 自动转换为 JPEG。
 - 企业微信图片通知会将微博缩略图地址转换为 `imageType=origin` 原图并完整转交中转服务；压缩、文件回退和大小降级统一由 `wework-send` 处理。
 - 启动补偿、断线补漏和指定时间范围的历史消息回溯。
 - 数据库唯一键去重，避免实时监听与历史同步产生重复消息和通知。
-- 按群聊、发送人、消息类型和关键词配置通知规则；关键词使用模糊匹配。
+- 按群聊、发送人和消息类型配置通知规则；消息列表支持按正文关键词模糊搜索。
 - 企业微信通知通过 outbox 异步投递，支持失败重试和状态记录。
-- 消息列表、实时更新、通知管理、成员统计和消息导出。
+- 消息列表、实时更新、通知管理、每日消息统计和 CSV/JSON/Markdown 导出。
 - 健康检查、Prometheus 指标、结构化日志和 systemd 常驻部署。
 
 ## 运行架构
@@ -63,6 +63,14 @@ cp .env.example .env
 DATABASE_URL=postgresql://用户名:密码@127.0.0.1:5432/weibo_data
 ```
 
+本机同时访问统一 server 和 Vite 时，还应把 `.env.example` 中的生产 Origin 改成本机地址：
+
+```env
+APP_ENV=development
+FRONTEND_PORT=6001
+CORS_ALLOWED_ORIGINS=http://localhost:6001,http://localhost:6002
+```
+
 需要企业微信通知时，再填写：
 
 ```env
@@ -71,28 +79,37 @@ WEWORK_RELAY_API_KEY=
 WEWORK_RELAY_TOUSER=
 ```
 
-2. 安装前端依赖并执行数据库迁移：
+2. 安装前端依赖、生成 server 必需的静态目录并执行数据库迁移：
 
 ```bash
 pnpm --dir frontend install
+pnpm --dir frontend run build
 go run ./cmd/weibo-assistant migrate
 ```
 
-3. 启动 monitor、统一 server；需要前端热更新时再启动 Vite：
+3. 在三个终端分别启动 monitor、统一 server 和 Vite：
 
 ```bash
 go run ./cmd/weibo-assistant monitor
-go run ./cmd/weibo-assistant server
-pnpm --dir frontend run dev
 ```
 
-首次启动或登录失效时，monitor 会通过企业微信发送提示和二维码。使用微博 App 扫码后，monitor 会自动选择目标群并开始监听；登录态保存在 `WEIBO_PROFILE_DIR`，默认目录为 `.weibo-profile`。
+```bash
+go run ./cmd/weibo-assistant server
+```
 
-monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关闭”。Linux 文字消息不添加环境前缀，其他系统保留“【测试】”；图片消息不添加前缀。
+```bash
+VITE_API_BASE=http://localhost:6001 pnpm --dir frontend run dev
+```
+
+本地开发页面地址为 `http://localhost:6002/weibo/`。当前 Vite 构建的 base 固定为 `/weibo/`；直连 `http://localhost:6001/` 虽能返回 HTML，但不会剥离静态资源的 `/weibo/` 前缀，不作为本地页面入口。生产页面应按后文部署文档通过 Nginx 将 `/weibo/` 代理到 server。
+
+首次启动或登录失效时，如果已配置企业微信中转，monitor 会发送提示和二维码；也可以使用网页异常条中的“登录”按钮。使用微博 App 扫码后，monitor 会自动选择目标群并开始监听；登录态保存在 `WEIBO_PROFILE_DIR`，默认目录为 `.weibo-profile`。
+
+配置企业微信中转后，monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关闭”。Linux 文字消息不添加环境前缀，其他系统保留“【测试】”；图片消息不添加前缀。
 
 ## 常用配置
 
-完整字段、默认值和说明见 [.env.example](./.env.example)。
+完整字段、推荐配置值和说明见 [.env.example](./.env.example)；代码内建默认值以 `internal/config/config.go` 为准。
 
 | 配置 | 说明 |
 | --- | --- |
@@ -100,7 +117,7 @@ monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关�
 | `DATABASE_URL` | PostgreSQL 连接串，必填 |
 | `BACKEND_BIND_ADDRESS` / `BACKEND_PORT` | API 监听地址和端口，默认 `0.0.0.0:6001` |
 | `FRONTEND_DIST_DIR` | server 托管的 Vue 构建目录，默认 `frontend/dist` |
-| `FRONTEND_PORT` | 本地开发兼容配置；统一生产部署设为 `6001` |
+| `FRONTEND_PORT` | 独立 `frontend` 子命令的监听端口，也是未显式配置 CORS 时用于校验页面 Origin 的端口；代码默认 `6002`，统一生产部署设为 `6001` |
 | `CORS_ALLOWED_ORIGINS` | 允许访问 API 和 WebSocket 的完整 Origin，多个值使用逗号分隔 |
 | `WEIBO_PROFILE_DIR` | Chrome 登录态目录，默认 `.weibo-profile` |
 | `HEADLESS` | 是否无头运行 Chrome，服务器建议设为 `true` |
@@ -109,7 +126,7 @@ monitor 启动和正常退出时会发送“微博群聊monitor已开启/已关�
 | `CHROME_RENDERER_CPU_LIMIT_PERCENT` | 单个 renderer 的 CPU 看门狗阈值，默认 `50%`；连续超限时先重载、仍不恢复则重启 monitor |
 | `CHROME_RENDERER_CPU_CONSECUTIVE_CHECKS` | 触发恢复动作所需的连续超限次数，默认 `3` 次 |
 | `CHROME_RENDERER_CPU_CHECK_INTERVAL_SECONDS` | 独立 renderer CPU 采样间隔，默认 `60` 秒（1 分钟） |
-| `TARGET_GROUP_ID` / `TARGET_GROUP_NAME` | 默认通知规则匹配的群聊，优先使用稳定 ID |
+| `TARGET_GROUP_ID` / `TARGET_GROUP_NAME` | monitor 只采集的目标群聊，同时用于环境变量默认通知规则；优先使用稳定 ID |
 | `TARGET_SENDER_ID` / `TARGET_SENDER_NAME` | 默认通知规则匹配的发送人，优先使用稳定 ID |
 | `WEWORK_RELAY_*` | 企业微信中转地址、鉴权密钥和接收人 |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | monitor 心跳间隔，默认 `60` 秒 |
@@ -146,7 +163,7 @@ cp .env.example .env
 
 sudo APP_DIR="$HOME/repos/weibo-assistant" \
   RUN_USER="$(id -un)" \
-  RUN_GROUP="$(id -gn)" \ \
+  RUN_GROUP="$(id -gn)" \
   ENABLE_NOW=true \
   ./scripts/install-systemd.sh
 ```
@@ -174,6 +191,8 @@ sudo systemctl restart weibo-assistant-server.service \
 
 完整说明见 [systemd 长期运行与日志](./docs/systemd长期运行与日志.md)。
 
+当前前端构建固定使用 `/weibo/` base。要正常加载静态资源和调用 API，请按部署文档配置 `/weibo/` 反向代理；不要把直连 `6001/` 当作生产页面地址。
+
 ## API 与健康检查
 
 | 接口 | 用途 |
@@ -188,7 +207,9 @@ sudo systemctl restart weibo-assistant-server.service \
 | `GET /api/groups` | 群聊列表 |
 | `GET /api/messages` | 消息列表 |
 | `GET/POST /api/groups/{id}/history-sync` | 查询或创建消息回溯任务 |
-| `GET/POST/PATCH/DELETE /api/notification-rules` | 通知规则管理；更新和删除接口需追加规则 ID |
+| `GET/POST /api/notification-rules` | 查询或创建通知规则 |
+| `PATCH/DELETE /api/notification-rules/{id}` | 更新或归档通知规则 |
+| `GET /api/notification-outbox` | 查询通知投递队列及失败状态 |
 | `GET /api/notification-events` | 通知事件和投递状态 |
 
 示例：

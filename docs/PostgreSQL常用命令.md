@@ -163,7 +163,7 @@ unset PGPASSWORD
 数据库名包含横杠等特殊字符时要加双引号：
 
 ```sql
-\c weibo_data
+\c "weibo-data"
 ```
 
 列出数据库：
@@ -322,7 +322,7 @@ CREATE DATABASE app_data
 数据库名包含横杠时：
 
 ```sql
-CREATE DATABASE weibo_data
+CREATE DATABASE "weibo-data"
   WITH OWNER weibo_user
   ENCODING 'UTF8';
 ```
@@ -600,19 +600,21 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO weibo_use
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO weibo_user;
 ```
 
-授权未来新表：
+如果由另一个迁移角色 `migration_owner` 创建对象，希望 `weibo_user` 自动获得未来新表权限，可执行：
 
 ```sql
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE migration_owner IN SCHEMA public
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO weibo_user;
 ```
 
-授权未来新序列：
+未来新序列同理：
 
 ```sql
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE migration_owner IN SCHEMA public
 GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO weibo_user;
 ```
+
+`ALTER DEFAULT PRIVILEGES` 只影响指定创建者之后新建的对象，并应由该创建者或超级用户执行。本项目通常直接用 `weibo_user` 运行迁移；它是自己创建对象的 owner，不需要再给自己授予默认权限。
 
 撤销权限：
 
@@ -861,17 +863,17 @@ fg
 
 ### 17.5 数据库名包含横杠时报语法错误
 
-SQL 中需要双引号：
+SQL 标识符和 `psql` 的 `\c` 参数需要双引号：
 
 ```sql
-\c weibo_data
-DROP DATABASE weibo_data;
+\c "weibo-data"
+DROP DATABASE "weibo-data";
 ```
 
 连接串中不需要双引号：
 
 ```env
-DATABASE_URL=postgresql://weibo_user:密码@127.0.0.1:5432/weibo_data
+DATABASE_URL=postgresql://weibo_user:密码@127.0.0.1:5432/weibo-data
 ```
 
 ### 17.6 password authentication failed

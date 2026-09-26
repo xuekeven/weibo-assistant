@@ -1,6 +1,6 @@
 # systemd 长期运行与日志查看
 
-本文描述当前统一前后端的生产部署方式。快速入口见 [项目 README](../README.md)，架构说明见 [1.技术方案.md](./1.技术方案.md)。
+本文描述当前统一前后端的生产部署方式。快速入口和运行架构见 [项目 README](../README.md)，代码分层见 [后端代码导读](./后端代码导读.md)。
 
 ## 目录
 
@@ -26,6 +26,7 @@
 - 后端 API / WebSocket 常驻，默认监听 `6001`。
 - 监控进程常驻，复用微博登录态打开网页版群聊并监听 WebSocket 消息。
 - Vue 构建产物由 server 同端口托管，不再需要独立前端服务。
+- 前端构建固定使用 `/weibo/` base，由 Nginx 按本文配置剥离该前缀后转发给 server。
 - server 和 monitor 日志写入项目的 `logs/` 目录并自动轮转。
 
 ## 服务拆分
@@ -183,6 +184,8 @@ chmod 600 ~/repos/weibo-assistant/.env
 
 `FRONTEND_DIST_DIR` 和 `WEIBO_PROFILE_DIR` 建议填写绝对路径。可先执行 `echo "$HOME"` 查看自己的 home 目录，再替换示例中的 `/home/你的用户名`。
 
+`FRONTEND_PORT` 是独立 `frontend` 子命令的端口，同时参与未显式配置 `CORS_ALLOWED_ORIGINS` 时的 Origin 校验。统一部署虽然不启动独立 frontend 服务，仍应将它设为页面实际使用的端口；页面与 server 同端口时设为 `6001`。代码默认值为 `6002`，适合本地 Vite 开发。
+
 `BACKEND_BIND_ADDRESS=0.0.0.0` 允许从 Tailscale 内网访问统一的 6001 服务。若只允许本机 Nginx 转发，可改为 `127.0.0.1`；若直接从 Tailscale IP 访问，可改为对应 `100.x` 地址并限制防火墙端口。
 
 统一生产部署应显式填写 `CORS_ALLOWED_ORIGINS`，值为浏览器实际访问页面的完整 Origin，例如 `https://homeserver.example.ts.net`。路径 `/weibo/` 不属于 Origin，不要写入该变量；多个 Origin 用逗号分隔。否则 WebSocket 握手会返回 `403 websocket origin is not allowed`。
@@ -193,7 +196,7 @@ chmod 600 ~/repos/weibo-assistant/.env
 
 1. 识别微博登录页，并将 monitor 状态更新为 `login_required`。
 2. 在 DOM 中找到二维码图片，通过 CDP 读取其原始 PNG 资源，避免页面弹层遮挡；读取失败时才降级为关闭弹层后截图。
-3. 使用 `WEWORK_RELAY_URL` 和 `WEWORK_RELAY_API_KEY` 先发送一条文字提示，再发送一条二维码 PNG 图片。
+3. 使用 `WEWORK_RELAY_URL` 和 `WEWORK_RELAY_API_KEY` 先发送一条文字提示，再发送一条二维码 PNG 图片；也可以在网页异常条点击“登录”，由 `POST /api/monitor/login-qr` 重载 monitor 登录页并弹窗展示新二维码。
 4. 保持无头 Chrome 运行，等待使用微博 App 扫描二维码。
 5. 登录成功后通过企业微信发送文字确认，将 Cookie、localStorage 等状态保存在 `WEIBO_PROFILE_DIR`，并自动恢复群聊监听。
 
@@ -203,13 +206,13 @@ chmod 600 ~/repos/weibo-assistant/.env
 chmod 700 ~/repos/weibo-assistant/.weibo-profile
 ```
 
-如果没有收到二维码，检查 `WEWORK_RELAY_API_KEY`、`WEWORK_RELAY_TOUSER` 和 monitor 日志。登录提醒发送失败时，monitor 保持运行并每分钟重试尚未成功的消息。未登录期间每隔 `LOGIN_QR_REFRESH_SECONDS` 重新读取二维码：二维码未变化时不重复发送，过期刷新为新二维码后会重新发送图片；文字提示在本次未登录期间只发送一次。
+如果没有收到企业微信二维码，检查 `WEWORK_RELAY_API_KEY`、`WEWORK_RELAY_TOUSER` 和 monitor 日志，也可直接使用网页“登录”按钮。登录提醒发送失败时，monitor 保持运行并每分钟重试尚未成功的消息。未登录期间每隔 `LOGIN_QR_REFRESH_SECONDS` 重新读取二维码：二维码未变化时不重复发送，过期刷新为新二维码后会重新发送图片；文字提示在本次未登录期间只发送一次。
 
 普通微博图片通知会把 `/msget_thumbnail` 转换为带 `imageType=origin` 的 `/msget` 原图地址，
 使用登录态下载完整字节后直接提交给 `wework-send`。本项目不按文件大小压缩或拒绝图片；
 企微图片、文件及文字降级策略由中转服务统一决定。
 
-monitor 进入监控主循环时发送“微博群聊monitor已开启”，正常停止或从可捕获的运行错误退出时发送“微博群聊monitor已关闭”。关闭通知使用独立的 20 秒超时，不受主进程取消信号影响；`SIGKILL`、主机断电和操作系统崩溃无法发送退出通知。
+配置企业微信中转后，monitor 进入监控主循环时发送“微博群聊monitor已开启”，正常停止或从可捕获的运行错误退出时发送“微博群聊monitor已关闭”。关闭通知使用独立的 20 秒超时，不受主进程取消信号影响；`SIGKILL`、主机断电和操作系统崩溃无法发送退出通知。
 
 ## 安装 systemd 服务
 
@@ -251,7 +254,7 @@ sudo APP_DIR="$HOME/repos/weibo-assistant" \
 
 脚本会把 `APP_DIR`、`RUN_USER`、`RUN_GROUP` 和该用户真实的 home 目录写入 unit 文件。服务最终以当前 Linux 用户运行，因此能直接访问该用户的 `.weibo-profile`，不需要额外创建 `weibo` 系统用户。特殊账号无法通过系统用户数据库取得 home 时，可额外传入 `RUN_HOME=/实际/home/目录`。
 
-安装脚本会在写入 unit 前检查：systemd 版本、绝对 `APP_DIR`、运行用户和组、二进制、`.env`、迁移文件和 `logrotate`。统一 server 还要求构建产物 `frontend/dist/index.html` 存在。写入后还会验证 systemd unit 和 logrotate 配置，任一检查失败都会停止，不会启用不完整的服务。
+安装脚本会在写入 unit 前检查：systemd 版本、绝对 `APP_DIR`、运行用户和组、二进制、`.env`、迁移文件和 `logrotate`。写入后还会验证 systemd unit 和 logrotate 配置。统一 server 启动时还要求 `FRONTEND_DIST_DIR` 存在，因此不要跳过前文的 `test -d ./frontend/dist`；仅当使用兼容选项 `INSTALL_FRONTEND=true` 时，安装脚本本身才额外检查 `frontend/dist/index.html`。
 
 脚本会把模板渲染到：
 
@@ -330,7 +333,7 @@ logs/monitor.log
 
 安装脚本会自动创建目录与文件，并安装 `/etc/logrotate.d/weibo-assistant`：日志每天轮转，保留 14 份并压缩旧日志。
 
-安装前请确认服务器已有 `logrotate` 和 `libheif-examples`（Ubuntu/Debian 可执行 `sudo apt install logrotate libheif-examples`）；安装脚本检测不到时会停止，避免日志在无轮转保护的情况下持续增长。
+安装前请确认服务器已有 `logrotate` 和 `libheif-examples`（Ubuntu/Debian 可执行 `sudo apt install logrotate libheif-examples`）。安装脚本会强制检查 `logrotate`；目前不会检查 `heif-convert`，缺少它时服务仍可启动，但 HEIC 图片转换会失败。
 
 推荐使用脚本：
 
@@ -400,7 +403,7 @@ target message wework notification sent
 后端日志里重点看：
 
 ```text
-后端服务已启动
+api server listening
 实时消息服务已启动，正在等待新消息
 网页已连接实时消息
 实时消息已推送到网页
@@ -425,7 +428,9 @@ ls -l logs/server.log logs/monitor.log
 sudo logrotate --debug /etc/logrotate.d/weibo-assistant
 ```
 
-`/readyz` 返回成功代表数据库可用且 monitor 心跳仍新鲜；还应确认 `/api/monitor/status` 中 `fresh=true`，且 `logs/monitor.log` 出现 `network monitor enabled` 和持续更新的 `monitor heartbeat`。
+最后一个命令只确认 server 能读取 `frontend/dist/index.html`。该 HTML 的资源路径以 `/weibo/` 开头，完整页面应在配置 Nginx 后通过外部 `/weibo/` 地址验收，而不是直接打开后端根路径。
+
+`/readyz` 返回成功代表数据库可用且 monitor 心跳仍新鲜；还应确认 `/api/monitor/status` 中 `fresh=true`、`lastHeartbeatAt` 持续更新，且 `logs/monitor.log` 出现 `network monitor enabled`。正常监听心跳在 `LOG_LEVEL=debug` 时记录为“微博实时监听正常”，生产默认 `info` 不会逐次打印心跳日志。
 
 ## 统一前后端与 Nginx 子路径部署
 
@@ -468,6 +473,8 @@ CORS_ALLOWED_ORIGINS=https://homeserver.example.ts.net
 
 这里的 Origin 不包含 `/weibo/` 路径。修改后执行 `sudo nginx -t`、重新加载 Nginx 并重启 server。
 
+最后通过浏览器访问 `https://homeserver.example.ts.net/weibo/`，并在开发者工具的 Network 面板确认 `/weibo/assets/*`、`/weibo/api/*` 和 WebSocket 都成功。直连 `http://127.0.0.1:6001/` 只适合检查 index 是否存在，不是完整页面入口。
+
 ## 常见问题
 
 ### 服务启动后立刻退出
@@ -497,15 +504,15 @@ CORS_ALLOWED_ORIGINS=https://homeserver.example.ts.net
 关注：
 
 ```text
-target group selection
+target group select status
 network monitor enabled
-monitor heartbeat
+微博监听状态更新
 ```
 
 如果一直没有选中目标群聊，检查：
 
 - `TARGET_GROUP_ID` 是否为群聊 ID。
-- `/api/monitor/status` 是否为 `login_required`；如果是，检查企业微信中的二维码消息并扫码。
+- `/api/monitor/status` 是否为 `login_required`；如果是，使用网页异常条的“登录”按钮，或检查企业微信中的二维码消息并扫码。
 - `WEIBO_PROFILE_DIR` 是否指向正确目录。
 
 ### 前端没有实时刷新

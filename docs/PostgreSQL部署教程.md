@@ -187,10 +187,12 @@ notification_outbox
 notification_events
 monitor_status
 monitor_runtime_metrics
+history_sync_jobs
+media_resolution_jobs
 schema_migrations
 ```
 
-`server` 只要求数据库和端口配置；企业微信配置由 `monitor` 的通知 worker 使用。启动 API：
+`server` 不要求企业微信密钥，但除了数据库和端口配置，还需要可读取的 `FRONTEND_DIST_DIR`（先运行 `pnpm --dir frontend run build` 或 `./scripts/build-linux.sh`）。企业微信配置由 `monitor` 的通知 worker 使用。启动 API：
 
 ```bash
 go run ./cmd/weibo-assistant server
@@ -202,6 +204,8 @@ go run ./cmd/weibo-assistant server
 curl "http://localhost:6001/livez"
 curl "http://localhost:6001/readyz"
 ```
+
+`/livez` 只检查 API 进程，server 启动后应返回 `200`。`/readyz` 还要求 monitor 心跳新鲜；尚未启动 monitor 时返回 `503` 是预期行为。
 
 ## 7. 常见问题
 
