@@ -857,6 +857,10 @@ func RefreshLoginPageAndCaptureQRCode(ctx context.Context, port int) ([]byte, er
 		}
 		image, err := capturePageScreenshot(ctx, currentTarget.WebSocketDebuggerURL)
 		if err == nil {
+			if validationErr := validateLoginQRCodeImage(image); validationErr != nil {
+				lastErr = validationErr
+				continue
+			}
 			return image, nil
 		}
 		lastErr = err
@@ -865,6 +869,48 @@ func RefreshLoginPageAndCaptureQRCode(ctx context.Context, port int) ([]byte, er
 		lastErr = errors.New("Weibo login QR code did not become ready")
 	}
 	return nil, fmt.Errorf("capture refreshed Weibo login QR code: %w", lastErr)
+}
+
+// validateLoginQRCodeImage prevents the login endpoint from returning Weibo's
+// grey lazy-loading placeholder (or a full-page screenshot) as a QR code. The
+// actual Weibo QR is square and contains substantial light/dark pixel regions;
+// the placeholder has neither property even though it uses the same DOM node.
+func validateLoginQRCodeImage(data []byte) error {
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode login QR image: %w", err)
+	}
+	bounds := decoded.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width < 80 || height < 80 || width > 2048 || height > 2048 {
+		return fmt.Errorf("unexpected login QR dimensions: %dx%d", width, height)
+	}
+	ratio := float64(width) / float64(height)
+	if ratio < 0.8 || ratio > 1.25 {
+		return fmt.Errorf("login QR image is not square: %dx%d", width, height)
+	}
+
+	var darkPixels, lightPixels int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := decoded.At(x, y).RGBA()
+			// ITU-R BT.601 luminance, with 16-bit color values reduced to 8-bit.
+			luminance := (299*(r>>8) + 587*(g>>8) + 114*(b>>8)) / 1000
+			if luminance < 96 {
+				darkPixels++
+			}
+			if luminance > 192 {
+				lightPixels++
+			}
+		}
+	}
+	totalPixels := width * height
+	const minimumContrastFraction = 0.05
+	if float64(darkPixels)/float64(totalPixels) < minimumContrastFraction ||
+		float64(lightPixels)/float64(totalPixels) < minimumContrastFraction {
+		return errors.New("login QR image is still a loading placeholder")
+	}
+	return nil
 }
 
 func readPageImageResource(ctx context.Context, client *cdpClient, source string) ([]byte, error) {

@@ -206,6 +206,11 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		TargetGroupID:          cfg.TargetGroupID,
 		TargetGroupName:        cfg.TargetGroupName,
 		OnProbe: func(probeCtx context.Context, probe browser.PageProbe) error {
+			// 登录失效不一定产生可观测的 CDP/WebSocket closed 事件。直接从
+			// 页面状态记录断线窗口，确保扫码恢复后仍会补偿离线消息。
+			if probe.Status == "login_required" {
+				recordHistoryDisconnect(probeCtx, st, targetGroup, disconnects)
+			}
 			// 心跳既更新健康状态，也尝试用 DOM 中的新图片地址补全旧附件。
 			if err := st.UpdateMonitorStatus(probeCtx, probe.Status, probe.URL, probe.Error); err != nil {
 				return err
@@ -362,6 +367,8 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		},
 		OnLoginRequired: loginAlerts.Notify,
 		OnLoginRestored: func() {
+			from, to, stopMID := disconnects.TakeRecoveryWindow()
+			go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
 			// 企微不可用不应阻塞微博监听恢复；后台进行有上限的重试。
 			go sendLoginRestoredNotification(ctx, loginAlerts)
 		},

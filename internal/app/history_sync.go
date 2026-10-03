@@ -92,14 +92,9 @@ func runHistorySyncWorker(ctx context.Context, cfg config.Config, st *store.Stor
 
 func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, targetURL string, job store.HistorySyncJob) error {
 	cursor := strings.TrimSpace(job.CursorMID)
-	if cursor == "" && job.Mode == "manual" {
-		oldestMID, err := st.GetOldestMessageMID(ctx, job.GroupID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		cursor = oldestMID
-	}
 	if cursor == "" {
+		// 手动回溯可能用于修复数据库中间的空洞，不能从本地最旧消息继续
+		// 向前翻页；必须从微博最新页开始，再按 requested_to/from 限定范围。
 		cursor = "0"
 	}
 	progress := store.HistorySyncProgress{CursorMID: cursor}
@@ -132,13 +127,10 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 			if err != nil {
 				return err
 			}
-			if reached, reason := historySyncBoundaryReached(stopMID, message.WeiboMessageID, existedAtSnapshot); reached {
+			if reached, reason := historySyncBoundaryReached(job.Mode, stopMID, message.WeiboMessageID, existedAtSnapshot); reached {
 				stopReason = reason
 				stop = true
 				break
-			}
-			if exists {
-				continue
 			}
 			if job.RequestedFrom != nil && message.SentAt != nil && message.SentAt.Before(*job.RequestedFrom) {
 				stopReason = "requested_start_reached"
@@ -146,6 +138,9 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 				break
 			}
 			if job.RequestedTo != nil && message.SentAt != nil && message.SentAt.After(*job.RequestedTo) {
+				continue
+			}
+			if exists {
 				continue
 			}
 			created, err := persistHistoryMessage(ctx, cfg, st, metrics, imageURLByFID, targetURL, job, message)
@@ -187,7 +182,12 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 	return nil
 }
 
-func historySyncBoundaryReached(stopMID string, messageMID string, existedAtSnapshot bool) (bool, string) {
+func historySyncBoundaryReached(mode string, stopMID string, messageMID string, existedAtSnapshot bool) (bool, string) {
+	// 手动任务由 requested_from/to 决定范围。已有消息只是去重依据，不能
+	// 作为停止条件，否则无法越过已知消息去填补数据库中间的空洞。
+	if mode == "manual" {
+		return false, ""
+	}
 	if strings.TrimSpace(stopMID) != "" && strings.TrimSpace(messageMID) == strings.TrimSpace(stopMID) {
 		return true, "stop_mid_reached"
 	}

@@ -168,6 +168,66 @@ func TestNormalizePNGRejectsUnexpectedDimensions(t *testing.T) {
 	}
 }
 
+func TestValidateLoginQRCodeImageRejectsLoadingPlaceholder(t *testing.T) {
+	placeholder := image.NewRGBA(image.Rect(0, 0, 180, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 180; x++ {
+			shade := uint8(145)
+			if x > y {
+				shade = 155
+			}
+			placeholder.Set(x, y, color.RGBA{R: shade, G: shade, B: shade + 5, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, placeholder); err != nil {
+		t.Fatalf("encode placeholder PNG: %v", err)
+	}
+	if err := validateLoginQRCodeImage(encoded.Bytes()); err == nil {
+		t.Fatal("expected low-contrast loading placeholder to be rejected")
+	}
+}
+
+func TestValidateLoginQRCodeImageAcceptsHighContrastSquare(t *testing.T) {
+	qrLike := image.NewRGBA(image.Rect(0, 0, 180, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 180; x++ {
+			if (x/6+y/6)%2 == 0 {
+				qrLike.Set(x, y, color.Black)
+			} else {
+				qrLike.Set(x, y, color.White)
+			}
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, qrLike); err != nil {
+		t.Fatalf("encode QR-like PNG: %v", err)
+	}
+	if err := validateLoginQRCodeImage(encoded.Bytes()); err != nil {
+		t.Fatalf("validateLoginQRCodeImage() error = %v", err)
+	}
+}
+
+func TestValidateLoginQRCodeImageRejectsFullPageScreenshot(t *testing.T) {
+	fullPage := image.NewRGBA(image.Rect(0, 0, 1280, 720))
+	for y := 0; y < 720; y++ {
+		for x := 0; x < 1280; x++ {
+			if (x/8+y/8)%2 == 0 {
+				fullPage.Set(x, y, color.Black)
+			} else {
+				fullPage.Set(x, y, color.White)
+			}
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, fullPage); err != nil {
+		t.Fatalf("encode full-page PNG: %v", err)
+	}
+	if err := validateLoginQRCodeImage(encoded.Bytes()); err == nil {
+		t.Fatal("expected non-square full-page screenshot to be rejected")
+	}
+}
+
 func TestRememberNetworkRequestKeepsBoundedSize(t *testing.T) {
 	requests := make(map[string]networkRequestInfo)
 	rememberNetworkRequest(requests, "request-1", networkRequestInfo{}, 2)
