@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,7 +30,6 @@ type loginAlertSender struct {
 	enabled   bool
 	textSent  bool
 	imageSent bool
-	imageHash [sha256.Size]byte
 }
 
 func newLoginAlertSender(client loginAlertClient, enabled bool) *loginAlertSender {
@@ -48,6 +46,9 @@ func (s *loginAlertSender) Notify(ctx context.Context, event browser.LoginRequir
 	if !s.enabled || s.client == nil {
 		return errors.New("weibo login notification is disabled; configure WEWORK_RELAY_URL and WEWORK_RELAY_API_KEY")
 	}
+	if s.imageSent {
+		return nil
+	}
 	if !s.textSent {
 		if _, err := s.client.SendText(ctx, loginRequiredNotificationText); err != nil {
 			return fmt.Errorf("send login text notification: %w", err)
@@ -62,15 +63,7 @@ func (s *loginAlertSender) Notify(ctx context.Context, event browser.LoginRequir
 			return fmt.Errorf("send login image notification: %w", err)
 		}
 		s.imageSent = true
-		s.imageHash = sha256.Sum256(event.ScreenshotPNG)
 		return nil
-	}
-	imageHash := sha256.Sum256(event.ScreenshotPNG)
-	if imageHash != s.imageHash {
-		if _, err := s.client.SendImageBytes(ctx, "weibo-login.png", event.ScreenshotPNG); err != nil {
-			return fmt.Errorf("refresh login image notification: %w", err)
-		}
-		s.imageHash = imageHash
 	}
 	return nil
 }
@@ -99,7 +92,6 @@ func (s *loginAlertSender) NotifyRestored(ctx context.Context) (bool, error) {
 func (s *loginAlertSender) resetLocked() {
 	s.textSent = false
 	s.imageSent = false
-	s.imageHash = [sha256.Size]byte{}
 }
 
 func sendLoginRestoredNotification(ctx context.Context, sender *loginAlertSender) {

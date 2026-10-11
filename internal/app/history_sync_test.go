@@ -7,17 +7,18 @@ import (
 
 func TestDisconnectWindowIsConsumedOnce(t *testing.T) {
 	window := &disconnectWindow{}
-	window.MarkDisconnected("first-mid")
+	lastMessageAt := time.Now().Add(-2 * time.Hour)
+	window.MarkDisconnected("first-mid", &lastMessageAt)
 	// Repeated login_required probes must not move the recovery boundary.
 	time.Sleep(time.Millisecond)
-	window.MarkDisconnected("later-mid")
+	window.MarkDisconnected("later-mid", nil)
 
 	from, to, stopMID := window.TakeRecoveryWindow()
 	if from == nil || to == nil {
 		t.Fatal("expected a recovery window")
 	}
-	if to.Before(*from) {
-		t.Fatalf("recovery window ended before it started: from=%v to=%v", from, to)
+	if !from.Equal(lastMessageAt) || to.Before(*from) {
+		t.Fatalf("recovery window has wrong bounds: from=%v to=%v, want from=%v", from, to, lastMessageAt)
 	}
 	if stopMID != "first-mid" {
 		t.Fatalf("stopMID = %q, want first-mid", stopMID)
@@ -46,12 +47,11 @@ func TestHistorySyncBoundaryReached(t *testing.T) {
 			wantReason:  "stop_mid_reached",
 		},
 		{
-			name:              "existing message protects against unreachable boundary",
-			stopMID:           "unavailable-event-mid",
+			name:              "existing message does not hide older gaps",
+			stopMID:           "100",
 			messageMID:        "99",
 			existedAtSnapshot: true,
-			wantReached:       true,
-			wantReason:        "existing_message_reached",
+			wantReached:       false,
 		},
 		{
 			name:              "message inserted after snapshot does not stop recovery",
@@ -69,6 +69,13 @@ func TestHistorySyncBoundaryReached(t *testing.T) {
 				t.Fatalf("historySyncBoundaryReached() = (%v, %q), want (%v, %q)", reached, reason, test.wantReached, test.wantReason)
 			}
 		})
+	}
+}
+
+func TestStartupHistorySyncStillStopsAtExistingMessage(t *testing.T) {
+	reached, reason := historySyncBoundaryReached("startup", "unavailable-mid", "99", true)
+	if !reached || reason != "existing_message_reached" {
+		t.Fatalf("startup history boundary = (%v, %q), want (true, existing_message_reached)", reached, reason)
 	}
 }
 

@@ -50,14 +50,13 @@ type Config struct {
 	NotificationMaxAttempts  int
 
 	// 长期运行、健康检查及内存上限相关配置。
-	HealthCheckInterval    time.Duration
-	MonitorStaleAfter      time.Duration
-	PageReloadInterval     time.Duration
-	CPUPowerAlertWatts     int
-	CPUTemperatureAlertC   int
-	ImageCacheTTL          time.Duration
-	ImageCacheMaxItems     int
-	LoginQRRefreshInterval time.Duration
+	HealthCheckInterval  time.Duration
+	MonitorStaleAfter    time.Duration
+	PageReloadInterval   time.Duration
+	CPUPowerAlertWatts   int
+	CPUTemperatureAlertC int
+	ImageCacheTTL        time.Duration
+	ImageCacheMaxItems   int
 
 	LogLevel string
 }
@@ -117,7 +116,6 @@ func Load(envPath string) (Config, error) {
 		CPUTemperatureAlertC:     readInt("CPU_TEMPERATURE_ALERT_CELSIUS", 75),
 		ImageCacheTTL:            time.Duration(readInt("IMAGE_CACHE_TTL_SECONDS", 86400)) * time.Second,
 		ImageCacheMaxItems:       readInt("IMAGE_CACHE_MAX_ITEMS", 1000),
-		LoginQRRefreshInterval:   time.Duration(readInt("LOGIN_QR_REFRESH_SECONDS", 120)) * time.Second,
 		LogLevel:                 getString("LOG_LEVEL", "info"),
 	}
 
@@ -202,9 +200,6 @@ func (c Config) ValidateMonitor() error {
 	}
 	if c.ImageCacheTTL <= 0 || c.ImageCacheMaxItems <= 0 {
 		errs = append(errs, errors.New("image cache TTL and max items must be greater than 0"))
-	}
-	if c.LoginQRRefreshInterval <= 0 {
-		errs = append(errs, errors.New("LOGIN_QR_REFRESH_SECONDS must be greater than 0"))
 	}
 	return errors.Join(errs...)
 }

@@ -131,7 +131,6 @@ VITE_API_BASE=http://localhost:6001 pnpm --dir frontend run dev
 | `WEWORK_RELAY_*` | 企业微信中转地址、鉴权密钥和接收人 |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | monitor 心跳间隔，默认 `60` 秒 |
 | `MONITOR_STALE_AFTER_SECONDS` | 心跳超时阈值，默认 `180` 秒 |
-| `LOGIN_QR_REFRESH_SECONDS` | 未登录时检查二维码的间隔，默认 `120` 秒 |
 | `LOG_LEVEL` | `debug`、`info`、`warn` 或 `error` |
 
 生产环境只有 server 对外监听 `BACKEND_BIND_ADDRESS:BACKEND_PORT`，前端静态文件与 API 共用该端口。通过反向代理部署时，`CORS_ALLOWED_ORIGINS` 必须包含页面的完整 Origin。API 当前没有应用层鉴权，不应直接暴露到公网。
@@ -143,10 +142,12 @@ VITE_API_BASE=http://localhost:6001 pnpm --dir frontend run dev
 | 模式 | 触发方式 | 通知策略 |
 | --- | --- | --- |
 | `startup` | monitor 启动后自动追到数据库已有的最新消息 | 不通知 |
-| `recovery` | 微博 WebSocket 断开并重连后自动补漏 | 新消息命中规则时通知 |
+| `recovery` | 微博 WebSocket 断开、登录失效后恢复时，从本地最后一条消息起自动补漏 | 新消息命中规则时通知 |
 | `manual` | 前端“消息回溯”或消息列表向上加载到本地边界 | 不通知 |
 
 历史消息和实时消息共用 `dedupe_key` 唯一约束，不会重复入库。手动回溯可指定起始时间和可选结束时间，任务进度通过 WebSocket 更新；任务显示“等待 monitor”时，应检查 monitor 服务和微博登录态。
+
+WebSocket 短时间内反复关闭或历史回溯接口失败时，monitor 会主动用微博历史接口校验会话；校验失败则刷新聊天页，以便及时识别登录过期。自动补漏会越过已保存的消息，追溯到断线前本地最后一条消息。
 
 ## Linux 部署
 

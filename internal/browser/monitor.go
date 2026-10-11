@@ -40,9 +40,9 @@ type MonitorOptions struct {
 	RendererCPUInterval    time.Duration
 	HealthCheckInterval    time.Duration
 	PageReloadInterval     time.Duration
-	LoginQRRefreshInterval time.Duration
 	TargetGroupID          string
 	TargetGroupName        string
+	AuthCheckRequests      <-chan string
 	OnProbe                func(context.Context, PageProbe) error
 	OnMessage              func(context.Context, NetworkMessage) error
 	OnImageReference       func(context.Context, NetworkImageReference) error
@@ -289,6 +289,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		err        error
 	}
 	networkErrCh := make(chan networkMonitorResult, 1)
+	webSocketClosedCh := make(chan struct{}, 16)
 	var networkCancel context.CancelFunc
 	networkGeneration := 0
 	reconnectAttempt := 0
@@ -338,7 +339,12 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			opts.OnCDPState(true, generation > 1)
 		}
 		go func() {
-			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests, opts.OnWebSocketState)
+			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests, opts.OnWebSocketState, func() {
+				select {
+				case webSocketClosedCh <- struct{}{}:
+				default:
+				}
+			})
 			select {
 			case networkErrCh <- networkMonitorResult{generation: generation, err: err}:
 			case <-ctx.Done():
@@ -378,6 +384,34 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			slog.Warn("page reload failed", "reason", reason, "error", err)
 		}
 	}
+	lastAuthCheckAt := time.Time{}
+	checkAuthenticationAfterAnomaly := func(reason string) {
+		if strings.TrimSpace(opts.TargetGroupID) == "" || time.Since(lastAuthCheckAt) < time.Minute {
+			return
+		}
+		currentTarget, probe := getCurrentPageProbe(ctx, opts.DebugPort)
+		if probe.Status != "page_ok" || currentTarget.WebSocketDebuggerURL == "" {
+			// The normal heartbeat handles an already-visible login page.
+			return
+		}
+		lastAuthCheckAt = time.Now()
+		checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		_, err := FetchGroupHistoryPage(checkCtx, currentTarget.WebSocketDebuggerURL, GroupHistoryRequest{
+			GroupID: opts.TargetGroupID,
+			Count:   1,
+		}, "weibo_auth_check")
+		cancel()
+		if err == nil {
+			slog.Info("active weibo login verification succeeded", "reason", reason)
+			return
+		}
+		// A failed history request alone does not prove login expiry. Reloading
+		// makes the actual login page visible, so the normal probe can decide.
+		slog.Warn("active weibo login verification failed; reloading chat page", "reason", reason, "error", err)
+		target = currentTarget
+		reloadCurrentPage("auth_verification_failed")
+	}
+	var recentWebSocketCloses []time.Time
 
 	checkRendererCPU := func(reading rendererCPUReading) error {
 		if reading.err != nil {
@@ -443,6 +477,13 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				return fmt.Errorf("browser monitor exited: %w", err)
 			}
 			return errors.New("browser monitor exited")
+		case reason := <-opts.AuthCheckRequests:
+			checkAuthenticationAfterAnomaly(reason)
+		case <-webSocketClosedCh:
+			recentWebSocketCloses = appendRecentWebSocketClose(recentWebSocketCloses, time.Now(), 2*time.Minute)
+			if len(recentWebSocketCloses) >= 2 {
+				checkAuthenticationAfterAnomaly("repeated_websocket_close")
+			}
 		case <-ticker.C:
 			currentTarget, probe := getCurrentPageProbe(ctx, opts.DebugPort)
 			if probe.Status == "login_required" {
@@ -561,6 +602,17 @@ func networkReconnectDelay(attempt int) time.Duration {
 	return delay
 }
 
+func appendRecentWebSocketClose(closes []time.Time, now time.Time, window time.Duration) []time.Time {
+	cutoff := now.Add(-window)
+	kept := closes[:0]
+	for _, closedAt := range closes {
+		if !closedAt.Before(cutoff) {
+			kept = append(kept, closedAt)
+		}
+	}
+	return append(kept, now)
+}
+
 func monitorArgs(opts MonitorOptions, profileDir string) []string {
 	args := []string{
 		"--user-data-dir=" + profileDir,
@@ -612,12 +664,12 @@ const (
 	loginRequiredError        = "微博登录已失效，请扫描企业微信收到的二维码"
 	loginScreenshotDelay      = 3 * time.Second
 	loginNotificationRetryGap = time.Minute
-	defaultLoginQRRefreshGap  = 2 * time.Minute
 	chatPageReadinessDelay    = 2 * time.Second
 )
 
 func waitForAuthenticatedChatPage(ctx context.Context, opts MonitorOptions) (chromeTarget, PageProbe, error) {
 	loginRequired := false
+	alertSent := false
 	alertError := ""
 	nextAlertAt := time.Time{}
 	lastProbeReportedAt := time.Time{}
@@ -659,10 +711,18 @@ func waitForAuthenticatedChatPage(ctx context.Context, opts MonitorOptions) (chr
 				lastProbeReportedAt = now
 			}
 
-			if opts.OnLoginRequired != nil && !now.Before(nextAlertAt) && target.WebSocketDebuggerURL != "" {
+			if opts.OnLoginRequired != nil && !alertSent && !now.Before(nextAlertAt) && target.WebSocketDebuggerURL != "" {
 				screenshot, screenshotErr := capturePageScreenshot(ctx, target.WebSocketDebuggerURL)
+				if screenshotErr == nil {
+					screenshotErr = validateLoginQRCodeImage(screenshot)
+				}
 				if screenshotErr != nil {
 					slog.Warn("capture weibo login screenshot failed", "error", screenshotErr)
+					// The QR may have expired while the login page still shows an
+					// overlay. Reload it rather than sending that page as a QR image.
+					if reloadErr := reloadPage(ctx, target.WebSocketDebuggerURL); reloadErr != nil {
+						slog.Warn("reload weibo login page after invalid QR failed", "error", reloadErr)
+					}
 					alertError = screenshotErr.Error()
 					probe.Error = loginRequiredError + "；发送登录提醒失败：" + alertError
 					reportPageProbe(ctx, opts, probe)
@@ -683,18 +743,11 @@ func waitForAuthenticatedChatPage(ctx context.Context, opts MonitorOptions) (chr
 						nextAlertAt = now.Add(loginNotificationRetryGap)
 					} else {
 						alertError = ""
+						alertSent = true
 						probe.Error = loginRequiredError
 						reportPageProbe(ctx, opts, probe)
 						lastProbeReportedAt = now
-						refreshGap := opts.LoginQRRefreshInterval
-						if refreshGap <= 0 {
-							refreshGap = defaultLoginQRRefreshGap
-						}
-						nextAlertAt = now.Add(refreshGap)
-						slog.Info("weibo login notification checked",
-							"screenshotBytes", len(screenshot),
-							"nextCheckIn", refreshGap,
-						)
+						slog.Info("weibo login notification sent", "screenshotBytes", len(screenshot))
 					}
 				}
 			}
@@ -1571,6 +1624,7 @@ func monitorNetworkEvents(
 	onMessagesParsed func(int),
 	onTrackedRequests func(int),
 	onWebSocketState func(connected bool, reconnected bool),
+	onWebSocketClosed func(),
 ) error {
 	if strings.TrimSpace(webSocketDebuggerURL) == "" {
 		return errors.New("websocket debugger URL is required")
@@ -1656,6 +1710,9 @@ func monitorNetworkEvents(
 					onTrackedRequests(len(requests))
 				}
 				slog.Info("network websocket closed", "requestID", params.RequestID, "url", networkURLLogValue(info.URL))
+				if onWebSocketClosed != nil && (strings.Contains(info.URL, "web.im.weibo.com/im") || (info.URL == "" && hadWebSocket)) {
+					onWebSocketClosed()
+				}
 				if onWebSocketState != nil && hadWebSocket && len(activeWebSockets) == 0 {
 					onWebSocketState(false, false)
 				}

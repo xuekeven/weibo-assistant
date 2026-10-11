@@ -30,6 +30,15 @@ func TestMonitorArgsAvoidRendererBusyLoopAndAllowBackgroundThrottling(t *testing
 	}
 }
 
+func TestAppendRecentWebSocketCloseDropsOldEvents(t *testing.T) {
+	now := time.Now()
+	closes := []time.Time{now.Add(-3 * time.Minute), now.Add(-time.Minute)}
+	closes = appendRecentWebSocketClose(closes, now, 2*time.Minute)
+	if len(closes) != 2 || !closes[0].Equal(now.Add(-time.Minute)) || !closes[1].Equal(now) {
+		t.Fatalf("recent WebSocket closes = %v, want last minute and now", closes)
+	}
+}
+
 func TestMonitoredPageMediaSuppressionCoversNotificationAudioAndFullMedia(t *testing.T) {
 	joined := strings.Join(monitoredPageBlockedURLs, " ")
 	for _, expected := range []string{"conchfairy.sinajs.cn/lib/chat.mp3", "upload.api.weibo.com/2/mss/msget?"} {

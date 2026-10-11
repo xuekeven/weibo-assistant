@@ -9,6 +9,7 @@ import MessageItem from './components/MessageItem.vue'
 import type { ManagementTab, MessageExportRequest, RuleForm } from './components/ManagementCenter.vue'
 import { useRealtimeConnection } from './composables/useRealtimeConnection'
 import { formatTime } from './utils/presentation'
+import { shouldAdvanceGroupPreview } from './utils/groupPreview'
 import { createLatestRequestGate } from './utils/requestGate'
 import {
   createHistorySync,
@@ -581,18 +582,18 @@ function sanitizeGroup(group: Group): Group {
   return group
 }
 
-function upsertMessage(message: Message) {
+function upsertMessage(message: Message, created: boolean) {
   const index = messages.value.findIndex((item) => item.id === message.id)
   if (!isDisplayableMessage(message)) {
     if (index >= 0) messages.value.splice(index, 1)
     return
   }
-  const shouldFollow = autoFollowMessages.value || messages.value.length === 0
-  updateGroupFromMessage(message)
-  if (String(message.groupId) !== String(selectedGroupId.value)) {
+  const shouldFollow = created && (autoFollowMessages.value || messages.value.length === 0)
+  if (created) updateGroupFromMessage(message)
+  if (created && String(message.groupId) !== String(selectedGroupId.value)) {
     unreadByGroup.value[message.groupId] = (unreadByGroup.value[message.groupId] || 0) + 1
     updateDocumentTitle()
-  } else if (!shouldFollow) {
+  } else if (created && !shouldFollow) {
     newMessageCount.value++
     unreadByGroup.value[message.groupId] = newMessageCount.value
     updateDocumentTitle()
@@ -669,6 +670,7 @@ function updateGroupFromMessage(message: Message) {
   const lastMessageAt = message.sentAt || message.capturedAt
   const index = groups.value.findIndex((group) => group.id === message.groupId)
   if (index >= 0) {
+    if (!shouldAdvanceGroupPreview(groups.value[index].lastMessageAt, lastMessageAt)) return
     groups.value.splice(index, 1, {
       ...groups.value[index],
       name: message.groupName || groups.value[index].name,
@@ -713,7 +715,7 @@ function handleRealtimeEvent(event: RealtimeEvent) {
         dailyMessageStats.value.yesterday++
       }
     }
-    upsertMessage(event.message)
+    upsertMessage(event.message, event.type === 'message_created')
     return
   }
   if (event.type === 'monitor_status_updated' && event.monitorStatus) {

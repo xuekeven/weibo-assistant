@@ -8,7 +8,7 @@
     "dev": "vite --host 0.0.0.0 --port 6002",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/utils/requestGate.test.ts",
+    "test": "node --experimental-strip-types --test src/utils/*.test.ts",
     "build": "pnpm run typecheck && vite build",
     "check": "pnpm run lint && pnpm run test && pnpm run build",
     "preview": "vite preview --host 0.0.0.0 --port 6002"

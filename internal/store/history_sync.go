@@ -221,17 +221,25 @@ func (s *Store) GetOldestMessageMID(ctx context.Context, groupID int64) (string,
 }
 
 func (s *Store) GetNewestHistoryBoundaryMID(ctx context.Context, groupID int64) (string, error) {
+	mid, _, err := s.GetNewestHistoryBoundary(ctx, groupID)
+	return mid, err
+}
+
+// GetNewestHistoryBoundary returns the last locally saved chat message and its
+// timestamp, so a recovery scan can start where the local history actually ends.
+func (s *Store) GetNewestHistoryBoundary(ctx context.Context, groupID int64) (string, time.Time, error) {
 	var mid string
+	var sentAt time.Time
 	err := s.pool.QueryRow(ctx, `
-		select coalesce(weibo_message_id, '')
+		select coalesce(weibo_message_id, ''), coalesce(sent_at, captured_at)
 		  from weibo_messages
 		 where group_id = $1
 		   and coalesce(weibo_message_id, '') <> ''
 		   and message_type <> 'event'
 		 order by coalesce(sent_at, captured_at) desc, id desc
 		 limit 1
-	`, groupID).Scan(&mid)
-	return mid, err
+	`, groupID).Scan(&mid, &sentAt)
+	return mid, sentAt, err
 }
 
 const historySyncSelect = `

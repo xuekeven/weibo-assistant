@@ -170,7 +170,6 @@ MONITOR_STALE_AFTER_SECONDS=180
 PAGE_RELOAD_INTERVAL_MINUTES=360
 CPU_POWER_ALERT_WATTS=25
 CPU_TEMPERATURE_ALERT_CELSIUS=75
-LOGIN_QR_REFRESH_SECONDS=120
 IMAGE_CACHE_TTL_SECONDS=86400
 IMAGE_CACHE_MAX_ITEMS=1000
 LOG_LEVEL=info
@@ -206,7 +205,7 @@ chmod 600 ~/repos/weibo-assistant/.env
 chmod 700 ~/repos/weibo-assistant/.weibo-profile
 ```
 
-如果没有收到企业微信二维码，检查 `WEWORK_RELAY_API_KEY`、`WEWORK_RELAY_TOUSER` 和 monitor 日志，也可直接使用网页“登录”按钮。登录提醒发送失败时，monitor 保持运行并每分钟重试尚未成功的消息。未登录期间每隔 `LOGIN_QR_REFRESH_SECONDS` 重新读取二维码：二维码未变化时不重复发送，过期刷新为新二维码后会重新发送图片；文字提示在本次未登录期间只发送一次。
+如果没有收到企业微信二维码，检查 `WEWORK_RELAY_API_KEY`、`WEWORK_RELAY_TOUSER` 和 monitor 日志，也可直接使用网页“登录”按钮。每次登录失效只发送一次文字提示和一张有效二维码，不定时刷新或重发；首次抓图或发送失败时，每分钟重试尚未成功的部分。二维码过期后可点击网页“登录”按钮获取新的二维码。
 
 普通微博图片通知会把 `/msget_thumbnail` 转换为带 `imageType=origin` 的 `/msget` 原图地址，
 使用登录态下载完整字节后直接提交给 `wework-send`。本项目不按文件大小压缩或拒绝图片；

@@ -79,7 +79,7 @@ func TestLoginAlertResetAllowsFutureLoginEpisode(t *testing.T) {
 	}
 }
 
-func TestLoginAlertOnlySendsChangedQRCode(t *testing.T) {
+func TestLoginAlertSendsOnlyOncePerEpisode(t *testing.T) {
 	client := &fakeLoginAlertClient{}
 	sender := newLoginAlertSender(client, true)
 
@@ -88,10 +88,10 @@ func TestLoginAlertOnlySendsChangedQRCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := joinLoginAlertCalls(client.calls); got != "text,image,image" {
-		t.Fatalf("calls = %q, want changed QR image only", got)
+	if got := joinLoginAlertCalls(client.calls); got != "text,image" {
+		t.Fatalf("calls = %q, want one text and one image", got)
 	}
-	if string(client.lastImage) != "qr-2" {
+	if string(client.lastImage) != "qr-1" {
 		t.Fatalf("last image = %q", string(client.lastImage))
 	}
 }

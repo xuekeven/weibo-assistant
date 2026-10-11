@@ -39,12 +39,15 @@ type disconnectWindow struct {
 	mid  string
 }
 
-func (window *disconnectWindow) MarkDisconnected(stopMID string) {
+func (window *disconnectWindow) MarkDisconnected(stopMID string, lastMessageAt *time.Time) {
 	window.mu.Lock()
 	defer window.mu.Unlock()
 	if window.from == nil {
-		now := time.Now()
-		window.from = &now
+		from := time.Now()
+		if lastMessageAt != nil && !lastMessageAt.IsZero() && lastMessageAt.Before(from) {
+			from = *lastMessageAt
+		}
+		window.from = &from
 		window.mid = strings.TrimSpace(stopMID)
 	}
 }
@@ -63,7 +66,7 @@ func (window *disconnectWindow) TakeRecoveryWindow() (*time.Time, *time.Time, st
 	return &from, &to, stopMID
 }
 
-func runHistorySyncWorker(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, target *historyPageTarget) {
+func runHistorySyncWorker(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, target *historyPageTarget, authCheckRequests chan<- string) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -73,6 +76,10 @@ func runHistorySyncWorker(ctx context.Context, cfg config.Config, st *store.Stor
 			case err == nil:
 				if runErr := processHistorySyncJob(ctx, cfg, st, metrics, imageURLByFID, targetURL, job); runErr != nil {
 					slog.Warn("history sync job failed", "jobID", job.ID, "mode", job.Mode, "error", runErr)
+					select {
+					case authCheckRequests <- "history_sync_failed":
+					default:
+					}
 					if markErr := st.FailHistorySync(ctx, job.ID, runErr); markErr != nil {
 						slog.Warn("mark history sync failed", "jobID", job.ID, "error", markErr)
 					}
@@ -183,15 +190,15 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 }
 
 func historySyncBoundaryReached(mode string, stopMID string, messageMID string, existedAtSnapshot bool) (bool, string) {
-	// 手动任务由 requested_from/to 决定范围。已有消息只是去重依据，不能
-	// 作为停止条件，否则无法越过已知消息去填补数据库中间的空洞。
+	// 手动任务由 requested_from/to 决定范围。恢复任务也必须越过已有
+	// 消息，直到断线前最后一条消息；否则中间空洞永远无法补齐。
 	if mode == "manual" {
 		return false, ""
 	}
 	if strings.TrimSpace(stopMID) != "" && strings.TrimSpace(messageMID) == strings.TrimSpace(stopMID) {
 		return true, "stop_mid_reached"
 	}
-	if existedAtSnapshot {
+	if mode == "startup" && existedAtSnapshot {
 		return true, "existing_message_reached"
 	}
 	return false, ""
@@ -308,13 +315,15 @@ func enqueueStartupHistorySync(ctx context.Context, st *store.Store, group store
 
 func recordHistoryDisconnect(ctx context.Context, st *store.Store, group store.Group, window *disconnectWindow) {
 	stopMID := ""
+	var lastMessageAt *time.Time
 	if group.ID > 0 {
-		value, err := st.GetNewestHistoryBoundaryMID(ctx, group.ID)
+		value, sentAt, err := st.GetNewestHistoryBoundary(ctx, group.ID)
 		if err == nil {
 			stopMID = value
+			lastMessageAt = &sentAt
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			slog.Warn("load disconnect history boundary failed", "error", err)
 		}
 	}
-	window.MarkDisconnected(stopMID)
+	window.MarkDisconnected(stopMID, lastMessageAt)
 }

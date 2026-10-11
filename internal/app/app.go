@@ -147,10 +147,11 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		}
 	}
 	historyCtx, cancelHistory := context.WithCancel(ctx)
+	authCheckRequests := make(chan string, 4)
 	historyDone := make(chan struct{})
 	go func() {
 		defer close(historyDone)
-		runHistorySyncWorker(historyCtx, cfg, st, metrics, imageURLByFID, historyTarget)
+		runHistorySyncWorker(historyCtx, cfg, st, metrics, imageURLByFID, historyTarget, authCheckRequests)
 	}()
 	defer func() {
 		cancelHistory()
@@ -191,20 +192,20 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 
 	// browser 不直接访问数据库。它发现事件后调用下面的 OnXxx 回调。
 	return browser.RunMonitor(ctx, browser.MonitorOptions{
-		URL:                    cfg.WeiboChatURL,
-		ProfileDir:             cfg.WeiboProfileDir,
-		Executable:             cfg.ChromeExecutable,
-		Headless:               cfg.Headless,
-		NoSandbox:              cfg.ChromeNoSandbox,
-		DebugPort:              cfg.ChromeDebugPort,
-		RendererCPULimit:       cfg.RendererCPULimit,
-		RendererCPUChecks:      cfg.RendererCPUChecks,
-		RendererCPUInterval:    cfg.RendererCPUInterval,
-		HealthCheckInterval:    cfg.HealthCheckInterval,
-		PageReloadInterval:     cfg.PageReloadInterval,
-		LoginQRRefreshInterval: cfg.LoginQRRefreshInterval,
-		TargetGroupID:          cfg.TargetGroupID,
-		TargetGroupName:        cfg.TargetGroupName,
+		URL:                 cfg.WeiboChatURL,
+		ProfileDir:          cfg.WeiboProfileDir,
+		Executable:          cfg.ChromeExecutable,
+		Headless:            cfg.Headless,
+		NoSandbox:           cfg.ChromeNoSandbox,
+		DebugPort:           cfg.ChromeDebugPort,
+		RendererCPULimit:    cfg.RendererCPULimit,
+		RendererCPUChecks:   cfg.RendererCPUChecks,
+		RendererCPUInterval: cfg.RendererCPUInterval,
+		HealthCheckInterval: cfg.HealthCheckInterval,
+		PageReloadInterval:  cfg.PageReloadInterval,
+		TargetGroupID:       cfg.TargetGroupID,
+		TargetGroupName:     cfg.TargetGroupName,
+		AuthCheckRequests:   authCheckRequests,
 		OnProbe: func(probeCtx context.Context, probe browser.PageProbe) error {
 			// 登录失效不一定产生可观测的 CDP/WebSocket closed 事件。直接从
 			// 页面状态记录断线窗口，确保扫码恢复后仍会补偿离线消息。
