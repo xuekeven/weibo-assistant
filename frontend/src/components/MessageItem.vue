@@ -10,6 +10,7 @@ const props = defineProps<{
   canResolveMedia: boolean
   mediaResolutionBusy: boolean
   isOwn: boolean
+  isFollowed: boolean
   located: boolean
 }>()
 
@@ -137,7 +138,8 @@ watch(
   <article v-if="message.messageType === 'system'" class="message-row system-message">
     <button type="button" :title="formatTime(message.sentAt || message.capturedAt)" @click="$emit('details', message)">{{ message.content || '微博群聊系统消息' }}</button>
   </article>
-  <article v-else :id="`message-${message.id}`" class="message-row" :class="{ 'own-message': isOwn, 'located-message': located }">
+  <article v-else :id="`message-${message.id}`" class="message-row" :class="{ 'own-message': isOwn, 'followed-message': isFollowed, 'located-message': located }">
+    <span v-if="isFollowed" class="follow-tag">关注</span>
     <img v-if="message.senderAvatar && failedAvatarURL !== message.senderAvatar" class="avatar sender" :src="avatarDisplayURL(message.senderAvatar)" alt="" loading="lazy" referrerpolicy="no-referrer" @error="failedAvatarURL = message.senderAvatar || ''" />
     <span v-else class="avatar sender" :style="{ backgroundColor: avatarColor(message.weiboSenderId || message.senderName) }">{{ initials(message.senderName) }}</span>
     <div class="message-main">

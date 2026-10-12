@@ -1375,6 +1375,7 @@ onUnmounted(() => {
             :can-resolve-media="monitorIsFresh"
             :media-resolution-busy="mediaResolutionRequests.has(message.id)"
             :is-own="Boolean(appConfig.currentUserId) && message.weiboSenderId === appConfig.currentUserId"
+            :is-followed="Boolean(appConfig.targetSenderId.trim()) && message.weiboSenderId === appConfig.targetSenderId.trim()"
             :located="locatedMessageId === message.id"
             @details="openMessageDetails"
             @locate="locateMessageInContext"

@@ -1175,7 +1175,34 @@ button:disabled {
 }
 
 .message-row {
+  position: relative;
   width: 100%;
+}
+
+.follow-tag {
+  position: absolute;
+  top: 7px;
+  right: calc(100% + 9px);
+  padding: 2px 5px;
+  border: 1px solid #9bd8b7;
+  border-radius: 4px;
+  background: #e8f6ed;
+  color: #18764a;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+@container (max-width: 720px) {
+  .message-row.followed-message {
+    padding-left: 40px;
+  }
+
+  .follow-tag {
+    left: 0;
+    right: auto;
+  }
 }
 
 .message-row.located-message {
