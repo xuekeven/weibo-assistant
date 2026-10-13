@@ -150,6 +150,16 @@ const monitorStatusItems = [
     description: '页面可以访问，标题和地址探测正常。'
   },
   {
+    key: 'message_connection_disconnected',
+    label: '微博消息连接已断开',
+    description: '聊天页面仍可访问，但实时消息连接已断开；重连后会自动回溯。'
+  },
+  {
+    key: 'message_connection_unconfirmed',
+    label: '微博消息连接待确认',
+    description: '聊天页面正常，但尚未观察到消息连接的握手或消息帧。'
+  },
+  {
     key: 'browser_started',
     label: '浏览器已启动',
     description: '无头 Chrome 已打开，正在进入微博聊天页。'
@@ -218,7 +228,8 @@ const monitorTone = computed(() => {
   const status = monitor.value?.status || ''
   if (!monitorIsFresh.value) return 'bad'
   if (monitor.value?.lastError) return 'bad'
-  if (status === 'login_required') return 'bad'
+  if (status === 'login_required' || status === 'message_connection_disconnected') return 'bad'
+  if (status === 'message_connection_unconfirmed') return 'warn'
   if (status.includes('ok') || status.includes('enabled') || status.includes('started') || status.includes('listening')) return 'good'
   if (status.includes('starting')) return 'warn'
   return 'idle'

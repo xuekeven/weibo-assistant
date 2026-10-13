@@ -290,6 +290,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	}
 	networkErrCh := make(chan networkMonitorResult, 1)
 	webSocketClosedCh := make(chan struct{}, 16)
+	chatSocket := &chatWebSocketState{onState: opts.OnWebSocketState}
 	var networkCancel context.CancelFunc
 	networkGeneration := 0
 	reconnectAttempt := 0
@@ -328,6 +329,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	// generation 用来识别已经过期的 goroutine 返回结果。
 	startNetworkMonitor := func(webSocketDebuggerURL string) {
 		stopReconnectTimer()
+		chatSocket.Reset()
 		if networkCancel != nil {
 			networkCancel()
 		}
@@ -339,7 +341,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 			opts.OnCDPState(true, generation > 1)
 		}
 		go func() {
-			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests, opts.OnWebSocketState, func() {
+			err := monitorNetworkEvents(networkCtx, webSocketDebuggerURL, opts.OnMessage, opts.OnImageReference, opts.OnMessagesParsed, opts.OnTrackedRequests, chatSocket, func() {
 				select {
 				case webSocketClosedCh <- struct{}{}:
 				default:
@@ -374,6 +376,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 	}
 
 	reloadCurrentPage := func(reason string) {
+		chatSocket.Reset()
 		if opts.OnBeforePageReload != nil {
 			if err := opts.OnBeforePageReload(ctx); err != nil {
 				slog.Warn("page reload preflight check failed", "reason", reason, "error", err)
@@ -517,9 +520,16 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 					startNetworkMonitor(target.WebSocketDebuggerURL)
 				}
 				if selectErr == nil {
-					probe.Status = "network_listening"
 					if opts.OnPageTarget != nil {
 						opts.OnPageTarget(currentTarget.WebSocketDebuggerURL)
+					}
+				}
+				if selectErr == nil && chatSocket.Connected() {
+					probe.Status = "network_listening"
+				} else if selectErr == nil {
+					probe.Status = "message_connection_unconfirmed"
+					if chatSocket.EverConnected() {
+						probe.Status = "message_connection_disconnected"
 					}
 				}
 			}
@@ -542,6 +552,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				networkCancel()
 				networkCancel = nil
 			}
+			chatSocket.Reset()
 			if opts.OnCDPState != nil {
 				opts.OnCDPState(false, false)
 			}
@@ -1623,7 +1634,7 @@ func monitorNetworkEvents(
 	onImageReference func(context.Context, NetworkImageReference) error,
 	onMessagesParsed func(int),
 	onTrackedRequests func(int),
-	onWebSocketState func(connected bool, reconnected bool),
+	chatSocket *chatWebSocketState,
 	onWebSocketClosed func(),
 ) error {
 	if strings.TrimSpace(webSocketDebuggerURL) == "" {
@@ -1648,8 +1659,6 @@ func monitorNetworkEvents(
 	slog.Info("network monitor enabled")
 
 	requests := make(map[string]networkRequestInfo)
-	activeWebSockets := make(map[string]struct{})
-	hadWebSocket := false
 	for {
 		envelope, err := client.readEnvelope(ctx)
 		if err != nil {
@@ -1686,17 +1695,24 @@ func monitorNetworkEvents(
 				URL       string `json:"url"`
 			}
 			if json.Unmarshal(envelope.Params, &params) == nil {
-				wasDisconnected := hadWebSocket && len(activeWebSockets) == 0
-				activeWebSockets[params.RequestID] = struct{}{}
-				hadWebSocket = true
+				if strings.Contains(params.URL, "web.im.weibo.com/im") {
+					chatSocket.Created(params.RequestID)
+				}
 				rememberNetworkRequest(requests, params.RequestID, networkRequestInfo{URL: params.URL, RequestURL: params.URL, ResourceType: "WebSocket"}, maxTrackedNetworkRequests)
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
 				slog.Info("network websocket created", "请求ID", params.RequestID, "url", networkURLLogValue(params.URL))
-				if onWebSocketState != nil && len(activeWebSockets) == 1 {
-					onWebSocketState(true, wasDisconnected)
-				}
+			}
+		case "Network.webSocketHandshakeResponseReceived":
+			var params struct {
+				RequestID string `json:"requestId"`
+				Response  struct {
+					Status int `json:"status"`
+				} `json:"response"`
+			}
+			if json.Unmarshal(envelope.Params, &params) == nil && params.Response.Status == 101 {
+				chatSocket.Handshake(params.RequestID)
 			}
 		case "Network.webSocketClosed":
 			var params struct {
@@ -1705,16 +1721,13 @@ func monitorNetworkEvents(
 			if json.Unmarshal(envelope.Params, &params) == nil {
 				info := requests[params.RequestID]
 				delete(requests, params.RequestID)
-				delete(activeWebSockets, params.RequestID)
 				if onTrackedRequests != nil {
 					onTrackedRequests(len(requests))
 				}
 				slog.Info("network websocket closed", "requestID", params.RequestID, "url", networkURLLogValue(info.URL))
-				if onWebSocketClosed != nil && (strings.Contains(info.URL, "web.im.weibo.com/im") || (info.URL == "" && hadWebSocket)) {
+				wasCurrent := chatSocket.Closed(params.RequestID)
+				if onWebSocketClosed != nil && wasCurrent {
 					onWebSocketClosed()
-				}
-				if onWebSocketState != nil && hadWebSocket && len(activeWebSockets) == 0 {
-					onWebSocketState(false, false)
 				}
 			}
 		case "Network.webSocketFrameReceived":
@@ -1728,6 +1741,7 @@ func monitorNetworkEvents(
 			if json.Unmarshal(envelope.Params, &params) != nil {
 				continue
 			}
+			chatSocket.FrameReceived(params.RequestID)
 			if !looksLikeMessagePayload(params.Response.PayloadData) {
 				continue
 			}

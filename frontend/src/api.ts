@@ -102,7 +102,7 @@ export type HistorySyncJob = {
   groupId: number
   weiboGroupId: string
   groupName: string
-  mode: 'startup' | 'recovery' | 'manual'
+  mode: 'startup' | 'recovery' | 'manual' | 'daily_gap'
   requestedFrom?: string
   requestedTo?: string
   cursorMid?: string

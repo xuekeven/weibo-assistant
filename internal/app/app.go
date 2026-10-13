@@ -157,6 +157,16 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		cancelHistory()
 		<-historyDone
 	}()
+	if targetGroup.ID > 0 {
+		gapCtx, cancelGap := context.WithCancel(ctx)
+		gapDone := make(chan struct{})
+		go func() { defer close(gapDone); runDailyGapAudit(gapCtx, st, targetGroup) }()
+		defer func() { cancelGap(); <-gapDone }()
+	}
+	alertCtx, cancelAlerts := context.WithCancel(ctx)
+	alertDone := make(chan struct{})
+	go func() { defer close(alertDone); runHistorySyncAlertWorker(alertCtx, st, weworkClient, weworkEnabled) }()
+	defer func() { cancelAlerts(); <-alertDone }()
 	mediaCtx, cancelMedia := context.WithCancel(ctx)
 	mediaDone := make(chan struct{})
 	go func() {
@@ -322,19 +332,27 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 			}
 			if reconnected {
 				metrics.cdpReconnects.Add(1)
-				from, to, stopMID := disconnects.TakeRecoveryWindow()
-				go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+				queueDisconnectedHistory(disconnects, func(from, to *time.Time, stopMID string) {
+					go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+				})
 			}
 		},
 		OnPageTarget: historyTarget.Set,
 		OnWebSocketState: func(connected bool, reconnected bool) {
 			if !connected {
 				recordHistoryDisconnect(ctx, st, targetGroup, disconnects)
+				if err := st.UpdateMonitorStatus(ctx, "message_connection_disconnected", cfg.WeiboChatURL, ""); err != nil {
+					slog.Warn("update disconnected message status failed", "error", err)
+				}
 				return
 			}
+			if err := st.UpdateMonitorStatus(ctx, "network_listening", cfg.WeiboChatURL, ""); err != nil {
+				slog.Warn("update connected message status failed", "error", err)
+			}
 			if reconnected {
-				from, to, stopMID := disconnects.TakeRecoveryWindow()
-				go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+				queueDisconnectedHistory(disconnects, func(from, to *time.Time, stopMID string) {
+					go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+				})
 			}
 		},
 		OnMessagesParsed: func(count int) {
@@ -368,8 +386,9 @@ func RunMonitor(ctx context.Context, cfg config.Config) error {
 		},
 		OnLoginRequired: loginAlerts.Notify,
 		OnLoginRestored: func() {
-			from, to, stopMID := disconnects.TakeRecoveryWindow()
-			go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+			queueDisconnectedHistory(disconnects, func(from, to *time.Time, stopMID string) {
+				go enqueueRecoveryHistorySync(ctx, st, targetGroup, from, to, stopMID)
+			})
 			// 企微不可用不应阻塞微博监听恢复；后台进行有上限的重试。
 			go sendLoginRestoredNotification(ctx, loginAlerts)
 		},

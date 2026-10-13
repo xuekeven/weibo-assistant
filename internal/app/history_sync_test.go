@@ -30,6 +30,22 @@ func TestDisconnectWindowIsConsumedOnce(t *testing.T) {
 	}
 }
 
+func TestLateReconnectQueuesOneRecoveryWindow(t *testing.T) {
+	window := &disconnectWindow{}
+	lastMessageAt := time.Now().Add(-5 * time.Hour)
+	window.MarkDisconnected("before-gap", &lastMessageAt)
+	called := 0
+	enqueue := func(from, to *time.Time, mid string) {
+		called++
+		if !from.Equal(lastMessageAt) || to.Sub(*from) < 5*time.Hour || mid != "before-gap" {
+			t.Fatalf("recovery window = %v to %v mid=%s", from, to, mid)
+		}
+	}
+	if !queueDisconnectedHistory(window, enqueue) || queueDisconnectedHistory(window, enqueue) || called != 1 {
+		t.Fatalf("reconnect queued %d jobs, want one", called)
+	}
+}
+
 func TestHistorySyncBoundaryReached(t *testing.T) {
 	tests := []struct {
 		name              string

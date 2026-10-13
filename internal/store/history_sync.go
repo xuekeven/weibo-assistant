@@ -63,7 +63,7 @@ func (s *Store) GetGroupByID(ctx context.Context, id int64) (Group, error) {
 
 func (s *Store) EnqueueHistorySync(ctx context.Context, params EnqueueHistorySyncParams) (HistorySyncJob, error) {
 	mode := strings.TrimSpace(params.Mode)
-	if mode != "startup" && mode != "recovery" && mode != "manual" {
+	if mode != "startup" && mode != "recovery" && mode != "manual" && mode != "daily_gap" {
 		return HistorySyncJob{}, errors.New("invalid history sync mode")
 	}
 	if params.MaxPages <= 0 {
@@ -139,6 +139,47 @@ func (s *Store) GetLatestHistorySyncForGroup(ctx context.Context, groupID int64)
 	return scanHistorySyncJob(s.pool.QueryRow(ctx, historySyncSelect+`
 		where j.group_id = $1 order by j.created_at desc, j.id desc limit 1
 	`, groupID))
+}
+
+func (s *Store) GetDailyGapJob(ctx context.Context, groupID int64, from, to time.Time) (HistorySyncJob, error) {
+	return scanHistorySyncJob(s.pool.QueryRow(ctx, historySyncSelect+`
+		where j.group_id = $1 and j.mode = 'daily_gap'
+		  and j.requested_from = $2 and j.requested_to = $3
+		order by j.id desc limit 1
+	`, groupID, from, to))
+}
+
+func (s *Store) MessageHours(ctx context.Context, groupID int64, from, to time.Time) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		select distinct to_char(coalesce(sent_at, captured_at) at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24')
+		  from weibo_messages
+		 where group_id = $1 and message_type <> 'event'
+		   and coalesce(sent_at, captured_at) >= $2 and coalesce(sent_at, captured_at) < $3
+	`, groupID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hours := make(map[string]bool)
+	for rows.Next() {
+		var hour string
+		if err := rows.Scan(&hour); err != nil {
+			return nil, err
+		}
+		hours[hour] = true
+	}
+	return hours, rows.Err()
+}
+
+func (s *Store) DailyGapAuditCompleted(ctx context.Context, groupID int64, day string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `select exists(select 1 from daily_gap_audits where group_id = $1 and audit_date = $2::date)`, groupID, day).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) CompleteDailyGapAudit(ctx context.Context, groupID int64, day string) error {
+	_, err := s.pool.Exec(ctx, `insert into daily_gap_audits (group_id, audit_date) values ($1, $2::date) on conflict do nothing`, groupID, day)
+	return err
 }
 
 func (s *Store) UpdateHistorySyncProgress(ctx context.Context, id int64, progress HistorySyncProgress) error {

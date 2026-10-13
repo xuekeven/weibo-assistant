@@ -66,6 +66,15 @@ func (window *disconnectWindow) TakeRecoveryWindow() (*time.Time, *time.Time, st
 	return &from, &to, stopMID
 }
 
+func queueDisconnectedHistory(window *disconnectWindow, enqueue func(*time.Time, *time.Time, string)) bool {
+	from, to, stopMID := window.TakeRecoveryWindow()
+	if from == nil || to == nil {
+		return false
+	}
+	enqueue(from, to, stopMID)
+	return true
+}
+
 func runHistorySyncWorker(ctx context.Context, cfg config.Config, st *store.Store, metrics *monitorMetrics, imageURLByFID *imageURLCache, target *historyPageTarget, authCheckRequests chan<- string) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -175,6 +184,9 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 			break
 		}
 	}
+	if job.Mode == "daily_gap" && (stopReason == "max_pages_reached" || stopReason == "cursor_not_advanced") {
+		return fmt.Errorf("daily gap history is incomplete: %s after %d pages", stopReason, progress.PagesFetched)
+	}
 	if err := st.CompleteHistorySync(ctx, job.ID, progress, stopReason); err != nil {
 		return err
 	}
@@ -192,7 +204,7 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 func historySyncBoundaryReached(mode string, stopMID string, messageMID string, existedAtSnapshot bool) (bool, string) {
 	// 手动任务由 requested_from/to 决定范围。恢复任务也必须越过已有
 	// 消息，直到断线前最后一条消息；否则中间空洞永远无法补齐。
-	if mode == "manual" {
+	if mode == "manual" || mode == "daily_gap" {
 		return false, ""
 	}
 	if strings.TrimSpace(stopMID) != "" && strings.TrimSpace(messageMID) == strings.TrimSpace(stopMID) {
@@ -277,19 +289,30 @@ func enqueueRecoveryHistorySync(ctx context.Context, st *store.Store, group stor
 	if from == nil || to == nil || group.ID <= 0 {
 		return
 	}
-	job, err := st.EnqueueHistorySync(ctx, store.EnqueueHistorySyncParams{
-		GroupID:       group.ID,
-		Mode:          "recovery",
-		RequestedFrom: from,
-		RequestedTo:   to,
-		MaxPages:      100,
-		StopMID:       stopMID,
-	})
-	if err != nil {
-		slog.Warn("enqueue recovery history sync failed", "error", err)
-		return
+	for {
+		job, err := st.EnqueueHistorySync(ctx, store.EnqueueHistorySyncParams{
+			GroupID:       group.ID,
+			Mode:          "recovery",
+			RequestedFrom: from,
+			RequestedTo:   to,
+			MaxPages:      100,
+			StopMID:       stopMID,
+		})
+		if err != nil {
+			slog.Warn("enqueue recovery history sync failed", "error", err)
+			return
+		}
+		if job.Mode == "recovery" && job.RequestedFrom != nil && job.RequestedTo != nil && job.RequestedFrom.Equal(*from) && job.RequestedTo.Equal(*to) {
+			slog.Info("recovery history sync queued", "jobID", job.ID, "from", from, "to", to)
+			return
+		}
+		if _, err := st.WaitHistorySyncJob(ctx, job.ID); err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("wait before recovery history sync failed", "error", err)
+			}
+			return
+		}
 	}
-	slog.Info("recovery history sync queued", "jobID", job.ID, "from", from, "to", to)
 }
 
 func enqueueStartupHistorySync(ctx context.Context, st *store.Store, group store.Group) error {
