@@ -43,9 +43,9 @@ func (window *disconnectWindow) MarkDisconnected(stopMID string, lastMessageAt *
 	window.mu.Lock()
 	defer window.mu.Unlock()
 	if window.from == nil {
-		from := time.Now()
+		from := time.Now().Truncate(time.Microsecond)
 		if lastMessageAt != nil && !lastMessageAt.IsZero() && lastMessageAt.Before(from) {
-			from = *lastMessageAt
+			from = lastMessageAt.Truncate(time.Microsecond)
 		}
 		window.from = &from
 		window.mid = strings.TrimSpace(stopMID)
@@ -59,7 +59,7 @@ func (window *disconnectWindow) TakeRecoveryWindow() (*time.Time, *time.Time, st
 		return nil, nil, ""
 	}
 	from := *window.from
-	to := time.Now()
+	to := time.Now().Truncate(time.Microsecond)
 	stopMID := window.mid
 	window.from = nil
 	window.mid = ""

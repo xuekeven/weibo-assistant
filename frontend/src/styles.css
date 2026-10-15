@@ -1139,11 +1139,20 @@ button:disabled {
 .error-line div {
   display: grid;
   gap: 3px;
+  min-width: 0;
 }
 
 .error-line strong,
 .error-line span {
   display: block;
+}
+
+.error-line span {
+  overflow-wrap: anywhere;
+}
+
+.error-line button {
+  flex: 0 0 auto;
 }
 
 .error-line button,

@@ -17,7 +17,7 @@ func TestDisconnectWindowIsConsumedOnce(t *testing.T) {
 	if from == nil || to == nil {
 		t.Fatal("expected a recovery window")
 	}
-	if !from.Equal(lastMessageAt) || to.Before(*from) {
+	if !from.Equal(lastMessageAt.Truncate(time.Microsecond)) || to.Before(*from) {
 		t.Fatalf("recovery window has wrong bounds: from=%v to=%v, want from=%v", from, to, lastMessageAt)
 	}
 	if stopMID != "first-mid" {
@@ -37,12 +37,31 @@ func TestLateReconnectQueuesOneRecoveryWindow(t *testing.T) {
 	called := 0
 	enqueue := func(from, to *time.Time, mid string) {
 		called++
-		if !from.Equal(lastMessageAt) || to.Sub(*from) < 5*time.Hour || mid != "before-gap" {
+		if !from.Equal(lastMessageAt.Truncate(time.Microsecond)) || to.Sub(*from) < 5*time.Hour || mid != "before-gap" {
 			t.Fatalf("recovery window = %v to %v mid=%s", from, to, mid)
 		}
 	}
 	if !queueDisconnectedHistory(window, enqueue) || queueDisconnectedHistory(window, enqueue) || called != 1 {
 		t.Fatalf("reconnect queued %d jobs, want one", called)
+	}
+}
+
+func TestRecoveryWindowMatchesDatabaseTimestampPrecision(t *testing.T) {
+	window := &disconnectWindow{}
+	lastMessageAt := time.Unix(1_760_000_000, 123456789)
+	window.MarkDisconnected("before-gap", &lastMessageAt)
+	from, to, _ := window.TakeRecoveryWindow()
+	if from == nil || to == nil {
+		t.Fatal("expected a recovery window")
+	}
+	for _, value := range []time.Time{*from, *to} {
+		if value.Nanosecond()%1000 != 0 {
+			t.Fatalf("timestamp %v cannot round-trip through PostgreSQL microsecond precision", value)
+		}
+		stored := time.UnixMicro(value.UnixMicro())
+		if !stored.Equal(value) {
+			t.Fatalf("stored timestamp %v differs from queued timestamp %v", stored, value)
+		}
 	}
 }
 

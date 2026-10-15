@@ -359,7 +359,6 @@ async function refreshAll() {
 
 async function runRefresh() {
   error.value = ''
-  const shouldFollow = autoFollowMessages.value || messages.value.length === 0
   const [groupResult, statusResult, notificationResult, userResult, ruleResult, outboxResult, readinessResult, configResult] = await Promise.all([
     listGroups(),
     getMonitorStatus(),
@@ -396,7 +395,7 @@ async function runRefresh() {
   } else {
     messages.value = []
   }
-  if (shouldFollow) {
+  if (autoFollowMessages.value) {
     scrollMessagesToBottom()
   }
 }
@@ -431,7 +430,7 @@ async function refreshMessages() {
     }
     const refreshedMessages = [...merged.values()]
       .sort((a, b) => new Date(b.sentAt || b.capturedAt).getTime() - new Date(a.sentAt || a.capturedAt).getTime())
-    messages.value = locatedContextMessageId.value === null ? refreshedMessages.slice(0, 80) : refreshedMessages
+    messages.value = refreshedMessages
     hasOlderMessages.value = items.length === 50
   } finally {
     if (messageRequests.isCurrent(request, currentMessageRequestKey())) {
@@ -503,7 +502,7 @@ async function applyFilters() {
   error.value = ''
   try {
     await refreshMessages()
-    scrollMessagesToBottom()
+    scrollMessagesToBottom(true)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }
@@ -555,7 +554,7 @@ async function selectGroup(group: Group) {
   error.value = ''
   try {
     await Promise.all([refreshMessages(), refreshHistorySync()])
-    scrollMessagesToBottom()
+    scrollMessagesToBottom(true)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }
@@ -621,7 +620,7 @@ function upsertMessage(message: Message, created: boolean) {
     messages.value.push(message)
     const refreshedMessages = [...messages.value]
       .sort((a, b) => new Date(b.sentAt || b.capturedAt).getTime() - new Date(a.sentAt || a.capturedAt).getTime())
-    messages.value = locatedContextMessageId.value === null ? refreshedMessages.slice(0, 80) : refreshedMessages
+    messages.value = refreshedMessages
   }
   if (shouldFollow) {
     scrollMessagesToBottom()
@@ -813,10 +812,11 @@ function updateAutoFollow() {
   }
 }
 
-function scrollMessagesToBottom() {
+function scrollMessagesToBottom(force = false) {
   nextTick(() => {
     window.requestAnimationFrame(() => {
       if (messageLocationActive.value) return
+      if (!force && !autoFollowMessages.value) return
       const element = messageListRef.value
       if (!element) return
       element.scrollTop = element.scrollHeight
@@ -1411,7 +1411,7 @@ onUnmounted(() => {
         v-if="!autoFollowMessages && orderedMessages.length > 0"
         class="jump-bottom"
         type="button"
-        @click="scrollMessagesToBottom"
+        @click="scrollMessagesToBottom(true)"
       >
         <span>{{ newMessageCount > 0 ? `${newMessageCount} 条新消息` : '回到底部' }}</span>
         <ArrowDownOutlined class="jump-bottom-icon" aria-hidden="true" />

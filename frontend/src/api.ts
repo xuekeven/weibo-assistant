@@ -208,7 +208,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return response.json() as Promise<T>
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(`请求后端超时：${API_BASE}${path}`, { cause: err })
+      throw new Error('请求超时，请稍后重试。', { cause: err })
     }
     throw err
   } finally {
