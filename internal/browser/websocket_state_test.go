@@ -1,6 +1,9 @@
 package browser
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestChatWebSocketStateReloadAndLateReconnect(t *testing.T) {
 	type change struct{ connected, reconnected bool }
@@ -46,5 +49,26 @@ func TestChatWebSocketStateFindsSocketAlreadyOpenAtAttach(t *testing.T) {
 	state.FrameReceived("existing")
 	if !state.Connected() || connected != 1 {
 		t.Fatalf("existing socket connected=%v notifications=%d", state.Connected(), connected)
+	}
+}
+
+func TestChatWebSocketStateDetectsStalledReconnect(t *testing.T) {
+	state := &chatWebSocketState{}
+	state.Reset()
+	state.Created("first")
+	if state.DisconnectedFor(time.Now().Add(time.Minute), 2*time.Minute) {
+		t.Fatal("reconnect timeout fired too soon")
+	}
+	state.Created("second") // another failed attempt must not postpone recovery forever
+	if !state.DisconnectedFor(time.Now().Add(3*time.Minute), 2*time.Minute) {
+		t.Fatal("reconnect timeout was postponed by an unconfirmed socket")
+	}
+	state.Handshake("second")
+	if state.DisconnectedFor(time.Now().Add(3*time.Minute), 2*time.Minute) {
+		t.Fatal("connected socket must clear the timeout")
+	}
+	state.Closed("second")
+	if !state.DisconnectedFor(time.Now().Add(3*time.Minute), 2*time.Minute) {
+		t.Fatal("closed socket must start a new recovery timeout")
 	}
 }

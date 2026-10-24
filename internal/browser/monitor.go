@@ -415,6 +415,7 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		reloadCurrentPage("auth_verification_failed")
 	}
 	var recentWebSocketCloses []time.Time
+	messageSocketRecoveryAttempts := 0
 
 	checkRendererCPU := func(reading rendererCPUReading) error {
 		if reading.err != nil {
@@ -526,11 +527,17 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 				}
 				if selectErr == nil && chatSocket.Connected() {
 					probe.Status = "network_listening"
+					messageSocketRecoveryAttempts = 0
 				} else if selectErr == nil {
 					probe.Status = "message_connection_unconfirmed"
 					if chatSocket.EverConnected() {
 						probe.Status = "message_connection_disconnected"
 					}
+				}
+				if chatSocket.DisconnectedFor(time.Now(), messageSocketRecoveryDelay(messageSocketRecoveryAttempts)) {
+					messageSocketRecoveryAttempts++
+					slog.Warn("message socket has not reconnected; reloading chat page", "attempt", messageSocketRecoveryAttempts)
+					reloadCurrentPage("message_socket_disconnected")
 				}
 			}
 			logMonitorHeartbeat(probe)
@@ -595,6 +602,17 @@ func RunMonitor(ctx context.Context, opts MonitorOptions) error {
 		case <-reloadC:
 			reloadCurrentPage("scheduled")
 		}
+	}
+}
+
+func messageSocketRecoveryDelay(attempts int) time.Duration {
+	switch attempts {
+	case 0:
+		return 2 * time.Minute
+	case 1:
+		return 5 * time.Minute
+	default:
+		return 10 * time.Minute
 	}
 }
 

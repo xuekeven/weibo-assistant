@@ -1,16 +1,20 @@
 package browser
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // chatWebSocketState follows the latest chat socket. Reloaded pages may never
 // emit close events for their old sockets, so counting all created sockets is
 // not a reliable indication that messages can still arrive.
 type chatWebSocketState struct {
-	mu        sync.Mutex
-	currentID string
-	hadSocket bool
-	connected bool
-	onState   func(bool, bool)
+	mu             sync.Mutex
+	currentID      string
+	hadSocket      bool
+	connected      bool
+	disconnectedAt time.Time
+	onState        func(bool, bool)
 }
 
 func (s *chatWebSocketState) Created(id string) {
@@ -18,6 +22,9 @@ func (s *chatWebSocketState) Created(id string) {
 	wasConnected := s.connected
 	s.currentID = id
 	s.connected = false
+	if wasConnected || s.disconnectedAt.IsZero() {
+		s.disconnectedAt = time.Now()
+	}
 	s.mu.Unlock()
 	if wasConnected && s.onState != nil {
 		s.onState(false, false)
@@ -32,6 +39,7 @@ func (s *chatWebSocketState) Handshake(id string) {
 	if shouldNotify {
 		s.connected = true
 		s.hadSocket = true
+		s.disconnectedAt = time.Time{}
 	}
 	s.mu.Unlock()
 	if shouldNotify && s.onState != nil {
@@ -60,6 +68,9 @@ func (s *chatWebSocketState) Closed(id string) bool {
 	if current {
 		s.currentID = ""
 		s.connected = false
+		if wasConnected {
+			s.disconnectedAt = time.Now()
+		}
 	}
 	s.mu.Unlock()
 	if current && wasConnected && s.onState != nil {
@@ -73,6 +84,7 @@ func (s *chatWebSocketState) Reset() {
 	wasConnected := s.connected
 	s.currentID = ""
 	s.connected = false
+	s.disconnectedAt = time.Now()
 	s.mu.Unlock()
 	if wasConnected && s.onState != nil {
 		s.onState(false, false)
@@ -83,6 +95,12 @@ func (s *chatWebSocketState) Connected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.connected
+}
+
+func (s *chatWebSocketState) DisconnectedFor(now time.Time, duration time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.connected && !s.disconnectedAt.IsZero() && now.Sub(s.disconnectedAt) >= duration
 }
 
 func (s *chatWebSocketState) EverConnected() bool {

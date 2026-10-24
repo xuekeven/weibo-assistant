@@ -726,6 +726,22 @@ func TestNetworkReconnectDelayUsesCappedExponentialBackoff(t *testing.T) {
 	}
 }
 
+func TestMessageSocketRecoveryDelay(t *testing.T) {
+	for _, test := range []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, 2 * time.Minute},
+		{1, 5 * time.Minute},
+		{2, 10 * time.Minute},
+		{5, 10 * time.Minute},
+	} {
+		if got := messageSocketRecoveryDelay(test.attempts); got != test.want {
+			t.Fatalf("attempts %d: want %s, got %s", test.attempts, test.want, got)
+		}
+	}
+}
+
 func TestNetworkURLLogValueRedactsPayloadAndUnknownQueryValues(t *testing.T) {
 	dataURL := "data:image/png;base64,very-secret-payload"
 	if got := networkURLLogValue(dataURL); strings.Contains(got, "very-secret-payload") {

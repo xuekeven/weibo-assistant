@@ -294,6 +294,7 @@ const loadOlderLabel = computed(() => {
     return historySyncBlocked.value ? `回溯已暂停（已扫描 ${historyJob.value?.pagesFetched || 0} 页）` : `正在回溯消息（${historyJob.value?.pagesFetched || 0} 页）`
   }
   if (loadingOlder.value) return '正在加载…'
+  if (!hasOlderMessages.value && hasActiveFilters.value) return '清空筛选并设置回溯'
   if (olderHistoryNotice.value) return olderHistoryNotice.value
   return hasOlderMessages.value ? '加载更早消息' : '请求回溯更早消息'
 })
@@ -500,6 +501,7 @@ function cancelMessageLocation() {
 async function applyFilters() {
   cancelMessageLocation()
   error.value = ''
+  olderHistoryNotice.value = ''
   try {
     await refreshMessages()
     scrollMessagesToBottom(true)
@@ -905,6 +907,15 @@ async function loadOlderMessages(triggerRemote = true) {
       loadingOlder.value = false
     }
   }
+}
+
+function handleLoadOlderClick() {
+  if (!hasOlderMessages.value && hasActiveFilters.value) {
+    void clearFilters()
+    openHistoryDialog()
+    return
+  }
+  void loadOlderMessages()
 }
 
 async function requestOlderHistoryPage() {
@@ -1368,7 +1379,7 @@ onUnmounted(() => {
             {{ selectedGroup.name }} · {{ hasActiveFilters ? `找到 ${orderedMessages.length} 条` : `最近 ${orderedMessages.length} 条` }}
           </div>
 
-          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="messageLocationActive || loadingOlder || historySyncActive" @click="loadOlderMessages()">
+          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="messageLocationActive || loadingOlder || historySyncActive" @click="handleLoadOlderClick">
             {{ loadOlderLabel }}
           </button>
 
