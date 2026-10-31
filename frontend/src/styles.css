@@ -814,6 +814,34 @@ h2 {
   line-height: 1.5;
 }
 
+.notify-row .notify-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.notify-actions button {
+  min-height: 32px;
+  border: 1px solid #cbd5dd;
+  border-radius: 6px;
+  background: #fff;
+  color: #52616d;
+  cursor: pointer;
+}
+
+.notify-actions button:first-child {
+  flex: 1;
+}
+
+.notify-actions .notify-delete {
+  width: 72px;
+  color: #b42318;
+  border-color: #e9b8b2;
+}
+
+.notify-actions .notify-delete:hover {
+  background: #fff1f0;
+}
+
 @media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 260px minmax(0, 1fr);
@@ -1357,6 +1385,121 @@ button:disabled {
   background: rgba(24, 31, 36, 0.4);
 }
 
+.history-calendar-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(24, 31, 36, 0.4);
+}
+
+.history-calendar-dialog {
+  width: min(420px, 100%);
+  padding: 24px;
+  border: 1px solid #d9e0e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 52px rgba(24, 31, 36, 0.22);
+}
+
+.history-calendar-dialog h3 {
+  margin: 0 0 20px;
+  color: #27343d;
+  font-size: 18px;
+}
+
+.history-calendar-selects {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.history-calendar-selects .history-calendar-select {
+  width: 100%;
+}
+
+.history-calendar-selects .history-calendar-select .ant-select-selector {
+  border-radius: 8px;
+}
+
+.history-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  text-align: center;
+}
+
+.history-calendar-weekday,
+.history-calendar-day {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  justify-self: center;
+  place-items: center;
+}
+
+.history-calendar-weekday {
+  color: #8b959d;
+}
+
+.history-calendar-day {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #27343d;
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-calendar-day:hover:not(:disabled) {
+  background: #e7f5ef;
+  color: #14785f;
+}
+
+.history-calendar-day.selected {
+  background: #14785f;
+  color: #fff;
+}
+
+.history-calendar-day:disabled {
+  color: #b0b8be;
+  cursor: default;
+}
+
+.history-calendar-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.history-calendar-actions button {
+  min-width: 84px;
+  height: 38px;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-calendar-cancel {
+  background: #f1f3f4;
+  color: #27343d;
+}
+
+.history-calendar-confirm {
+  background: #14785f;
+  color: #fff;
+}
+
+.history-calendar-confirm:disabled {
+  background: #b6d9cd;
+  cursor: default;
+}
+
 .history-dialog {
   width: min(520px, 100%);
   overflow: hidden;
@@ -1377,6 +1520,14 @@ button:disabled {
 
 .history-dialog > header {
   border-bottom: 1px solid #e5eaed;
+}
+
+.history-sync-dialog > header > .ant-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  margin-right: -8px;
+  padding: 0;
 }
 
 .history-dialog > header h3,
@@ -1410,17 +1561,14 @@ button:disabled {
   gap: 6px 10px;
 }
 
+.latest-history-heading {
+  flex-wrap: nowrap;
+}
+
 .history-field-heading strong {
   color: #34424c;
   font-size: 14px;
   font-weight: 700;
-}
-
-.history-form label em {
-  color: #7d8a93;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 500;
 }
 
 .history-form small {
@@ -1428,6 +1576,12 @@ button:disabled {
   font-size: 12px;
   font-weight: 400;
   line-height: 1.45;
+}
+
+@media (max-width: 480px) {
+  .latest-history-heading {
+    flex-wrap: wrap;
+  }
 }
 
 .history-date-time {
@@ -1504,6 +1658,11 @@ button:disabled {
   color: #33424d;
 }
 
+.history-sync-dialog .history-footer-button.ant-btn-default {
+  min-width: 68px;
+  padding-inline: 12px;
+}
+
 .history-footer-button.ant-btn-default:hover {
   border-color: #9ab2c5;
   color: #1f303b;
@@ -1530,6 +1689,11 @@ button:disabled {
   border-top: 1px solid #e5eaed;
   margin-top: 20px;
   background: #f8fafb;
+}
+
+.history-sync-dialog > footer {
+  height: 60px;
+  padding-block: 0;
 }
 
 .group-skeletons,

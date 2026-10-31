@@ -116,13 +116,17 @@ func processHistorySyncJob(ctx context.Context, cfg config.Config, st *store.Sto
 	progress := store.HistorySyncProgress{CursorMID: cursor}
 	stopReason := "max_pages_reached"
 	stopMID := strings.TrimSpace(job.StopMID)
+	pageSize := 20
+	if job.Mode == "manual" {
+		pageSize = 50
+	}
 
 	for progress.PagesFetched < job.MaxPages {
 		pageCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		page, err := browser.FetchGroupHistoryPage(pageCtx, targetURL, browser.GroupHistoryRequest{
 			GroupID: job.WeiboGroupID,
 			MaxMID:  cursor,
-			Count:   20,
+			Count:   pageSize,
 		}, historyMessageSource(job.Mode))
 		cancel()
 		if err != nil {
@@ -261,7 +265,13 @@ func persistHistoryMessage(ctx context.Context, cfg config.Config, st *store.Sto
 	if err := st.MarkMonitorMessage(ctx); err != nil {
 		slog.Warn("update monitor last message time after history sync failed", "error", err)
 	}
-	if resolveErr := resolveHistoryImageAttachments(ctx, st, imageURLByFID, targetURL, message.Attachments); resolveErr != nil {
+	if job.Mode == "manual" {
+		// Deep manual backfills can contain thousands of images. Keep the message
+		// scan moving and let the durable media worker resolve missing URLs.
+		if _, enqueueErr := st.EnqueueMediaResolutionForMessage(ctx, result.Message.ID); enqueueErr != nil {
+			slog.Warn("enqueue historical image resolution failed", "messageID", result.Message.ID, "error", enqueueErr)
+		}
+	} else if resolveErr := resolveHistoryImageAttachments(ctx, st, imageURLByFID, targetURL, message.Attachments); resolveErr != nil {
 		slog.Warn("resolve history image attachments failed",
 			"messageID", result.Message.ID,
 			"weiboMessageID", result.Message.WeiboMessageID,

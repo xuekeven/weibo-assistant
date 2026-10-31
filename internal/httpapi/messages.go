@@ -145,6 +145,46 @@ func (s *Server) handleListGroupMessages(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (s *Server) handleGetGroupDayAnchor(w http.ResponseWriter, r *http.Request) {
+	groupID, err := pathInt64(r, "/api/groups/", "/messages/day-anchor")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	from, ok := parseOptionalTime(w, r, "from")
+	if !ok {
+		return
+	}
+	to, ok := parseOptionalTime(w, r, "to")
+	if !ok {
+		return
+	}
+	if from == nil || to == nil || !from.Before(*to) || to.Sub(*from) > 25*time.Hour {
+		writeError(w, http.StatusBadRequest, errors.New("valid day range is required"))
+		return
+	}
+	message, err := s.store.GetFirstGroupMessageInRange(r.Context(), groupID, *from, *to)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"message": message})
+}
+
+func (s *Server) handleListGroupMessageDays(w http.ResponseWriter, r *http.Request) {
+	groupID, err := pathInt64(r, "/api/groups/", "/message-days")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	days, err := s.store.ListGroupMessageDays(r.Context(), groupID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"days": days})
+}
+
 func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	id, err := pathInt64(r, "/api/messages/", "")
 	if err != nil {
@@ -161,6 +201,36 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, message)
+}
+
+func (s *Server) handleGetMessageContext(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/messages/", "/context")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	before, ok := queryIntRange(w, r, "before", 20, 0, 100)
+	if !ok {
+		return
+	}
+	after, ok := queryIntRange(w, r, "after", 20, 0, 100)
+	if !ok {
+		return
+	}
+	if before == 0 && after == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("before or after must be greater than zero"))
+		return
+	}
+	context, err := s.store.GetMessageContext(r.Context(), id, before, after)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, context)
 }
 
 func (s *Server) handleResolveMessageMedia(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +441,19 @@ func (s *Server) handleRetryNotificationOutbox(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "retry"})
+}
+
+func (s *Server) handleDeleteNotificationOutbox(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt64(r, "/api/notification-outbox/", "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteNotificationOutbox(r.Context(), id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func queryIntRange(w http.ResponseWriter, r *http.Request, key string, fallback int, min int, max int) (int, bool) {

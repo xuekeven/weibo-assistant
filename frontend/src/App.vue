@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ArrowDownOutlined, ExportOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
+import { ArrowDownOutlined, CalendarOutlined, ExportOutlined, HistoryOutlined, MenuOutlined, NotificationOutlined } from '@ant-design/icons-vue'
 import { message as antMessage } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
+import dayjs, { type Dayjs } from 'dayjs'
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import GroupSidebar from './components/GroupSidebar.vue'
+import HistoryCalendarDialog from './components/HistoryCalendarDialog.vue'
 import MessageFilters from './components/MessageFilters.vue'
 import MessageItem from './components/MessageItem.vue'
 import type { ManagementTab, MessageExportRequest, RuleForm } from './components/ManagementCenter.vue'
@@ -15,11 +17,15 @@ import {
   createHistorySync,
   createNotificationRule,
   createRealtimeSocket,
+  deleteNotificationOutbox,
   deleteNotificationRule,
   downloadGroupMessages,
   getAppConfig,
   getGroupDailyMessageStats,
+  getGroupDayAnchor,
+  getGroupMessageDays,
   getMessage,
+  getMessageContext,
   getHistorySync,
   getReadiness,
   getMonitorStatus,
@@ -67,6 +73,10 @@ const query = ref('')
 const selectedSenderIds = ref<string[]>([])
 const timeRange = ref('all')
 const customDate = ref('')
+const historyCalendarOpen = ref(false)
+const historyCalendarDays = ref<string[]>([])
+const historyDaysCache = new Map<number, string[]>()
+const historyDaysPending = new Map<number, Promise<string[]>>()
 const loading = ref(false)
 const messagesLoading = ref(false)
 const error = ref('')
@@ -75,6 +85,8 @@ const panelTab = ref<ManagementTab>('notifications')
 const selectedMessage = ref<Message | null>(null)
 const loadingOlder = ref(false)
 const hasOlderMessages = ref(true)
+const loadingNewer = ref(false)
+const hasNewerMessages = ref(false)
 const historyDialogOpen = ref(false)
 const historyFrom = ref('')
 const historyTo = ref('')
@@ -108,9 +120,12 @@ const messageLocationActive = computed(() => locatingMessageId.value !== null ||
 const locationLoadingText = ref('')
 const messageRequests = createLatestRequestGate()
 const olderMessageRequests = createLatestRequestGate()
+const newerMessageRequests = createLatestRequestGate()
 const historyRequests = createLatestRequestGate()
 const detailRequests = createLatestRequestGate()
 const locateMessageRequests = createLatestRequestGate()
+const historyDayRequests = createLatestRequestGate()
+const historyCalendarRequests = createLatestRequestGate()
 const antTheme = {
   token: {
     colorPrimary: '#17785d',
@@ -197,7 +212,6 @@ let clockTimer: number | undefined
 let keywordSearchTimer: number | undefined
 let locateHighlightTimer: number | undefined
 let suppressKeywordSearch = false
-const locatePageSize = 200
 const locateContextSize = 20
 let lastAutoHistoryBoundary = ''
 
@@ -210,10 +224,13 @@ const selectedGroup = computed(() => {
 })
 
 const orderedMessages = computed(() => {
-  return messages.value.filter(isDisplayableMessage).sort((a, b) => {
-    return new Date(a.sentAt || a.capturedAt).getTime() - new Date(b.sentAt || b.capturedAt).getTime()
-  })
+  return messages.value.filter(isDisplayableMessage).sort(compareMessageOrder)
 })
+
+function compareMessageOrder(a: Message, b: Message) {
+  const difference = new Date(a.sentAt || a.capturedAt).getTime() - new Date(b.sentAt || b.capturedAt).getTime()
+  return difference || a.id - b.id
+}
 
 const monitorIsFresh = computed(() => {
   const heartbeat = monitor.value?.lastHeartbeatAt
@@ -388,8 +405,8 @@ async function runRefresh() {
     selectedGroupId.value = visibleGroups.value[0].id
   }
   if (selectedGroupId.value) {
-    if (locatingMessageId.value !== null) {
-      await refreshHistorySync()
+    if (locatingMessageId.value !== null || locatedContextMessageId.value !== null) {
+      await Promise.all([refreshHistorySync(), refreshDailyMessageStats()])
     } else {
       await Promise.all([refreshMessages(), refreshHistorySync()])
     }
@@ -489,16 +506,22 @@ async function refreshHistorySync() {
 }
 
 function cancelMessageLocation() {
+  if (locatedContextMessageId.value !== null) messages.value = []
   locateMessageRequests.invalidate()
+  olderMessageRequests.invalidate()
+  newerMessageRequests.invalidate()
   locatingMessageId.value = null
   locatedMessageId.value = null
   locatedContextMessageId.value = null
+  loadingNewer.value = false
+  hasNewerMessages.value = false
   locationLoadingText.value = ''
   window.clearTimeout(locateHighlightTimer)
   locateHighlightTimer = undefined
 }
 
 async function applyFilters() {
+  historyDayRequests.invalidate()
   cancelMessageLocation()
   error.value = ''
   olderHistoryNotice.value = ''
@@ -540,6 +563,9 @@ async function clearFilter(key: string) {
 }
 
 async function selectGroup(group: Group) {
+  historyDayRequests.invalidate()
+  historyCalendarRequests.invalidate()
+  historyCalendarOpen.value = false
   selectedGroupId.value = group.id
   messages.value = []
   cancelMessageLocation()
@@ -559,6 +585,70 @@ async function selectGroup(group: Group) {
     scrollMessagesToBottom(true)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+function loadHistoryDays(groupID: number, refresh = false): Promise<string[]> {
+  const pending = historyDaysPending.get(groupID)
+  if (pending) return pending
+  const cached = historyDaysCache.get(groupID)
+  if (cached && !refresh) return Promise.resolve(cached)
+  const request = getGroupMessageDays(groupID).then(({ days }) => {
+    historyDaysCache.set(groupID, days)
+    return days
+  }).finally(() => historyDaysPending.delete(groupID))
+  historyDaysPending.set(groupID, request)
+  return request
+}
+
+watch(selectedGroupId, (groupID) => {
+  if (groupID) void loadHistoryDays(groupID).catch(() => {})
+})
+
+async function openHistoryCalendar() {
+  const groupID = selectedGroupId.value
+  if (!groupID) return
+  const request = historyCalendarRequests.begin(String(groupID))
+  try {
+    const days = await loadHistoryDays(groupID)
+    if (!historyCalendarRequests.isCurrent(request, String(selectedGroupId.value))) return
+    historyCalendarDays.value = days
+    historyCalendarOpen.value = true
+    void loadHistoryDays(groupID, true).then((updatedDays) => {
+      if (historyCalendarRequests.isCurrent(request, String(selectedGroupId.value))) historyCalendarDays.value = updatedDays
+    }).catch(() => {})
+  } catch (err) {
+    if (historyCalendarRequests.isCurrent(request, String(selectedGroupId.value))) antMessage.error(err instanceof Error ? err.message : '查询聊天记录日期失败')
+  }
+}
+
+function closeHistoryCalendar() {
+  historyCalendarRequests.invalidate()
+  historyCalendarOpen.value = false
+}
+
+function selectHistoryCalendarDay(date: string) {
+  closeHistoryCalendar()
+  void jumpToHistoryDay(dayjs(date))
+}
+
+async function jumpToHistoryDay(day: Dayjs | null) {
+  const groupID = selectedGroupId.value
+  if (!day || !groupID) return
+  const requestKey = `${groupID}:${day.format('YYYY-MM-DD')}`
+  const request = historyDayRequests.begin(requestKey)
+  const from = day.startOf('day')
+  const to = from.add(1, 'day')
+  try {
+    const { message } = await getGroupDayAnchor(groupID, from.toDate().toISOString(), to.toDate().toISOString())
+    if (!historyDayRequests.isCurrent(request, requestKey) || String(selectedGroupId.value) !== String(groupID)) return
+    if (!message) {
+      antMessage.info(`${day.format('YYYY-MM-DD')} 没有已保存的聊天记录`)
+      return
+    }
+    await locateMessageInContext(message)
+  } catch (err) {
+    if (historyDayRequests.isCurrent(request, requestKey)) antMessage.error(err instanceof Error ? err.message : '加载历史消息失败')
   }
 }
 
@@ -602,6 +692,27 @@ function upsertMessage(message: Message, created: boolean) {
   }
   const shouldFollow = created && (autoFollowMessages.value || messages.value.length === 0)
   if (created) updateGroupFromMessage(message)
+  if ((locatingMessageId.value !== null || locatedContextMessageId.value !== null) && index < 0 && String(message.groupId) === String(selectedGroupId.value)) {
+    let outsideWindow = locatingMessageId.value !== null
+    const oldest = orderedMessages.value[0]
+    const newest = orderedMessages.value.at(-1)
+    if (newest && compareMessageOrder(message, newest) > 0) {
+      hasNewerMessages.value = true
+      outsideWindow = true
+    }
+    if (oldest && compareMessageOrder(message, oldest) < 0) {
+      hasOlderMessages.value = true
+      outsideWindow = true
+    }
+    if (outsideWindow) {
+      if (created) {
+        newMessageCount.value++
+        unreadByGroup.value[message.groupId] = newMessageCount.value
+        updateDocumentTitle()
+      }
+      return
+    }
+  }
   if (created && String(message.groupId) !== String(selectedGroupId.value)) {
     unreadByGroup.value[message.groupId] = (unreadByGroup.value[message.groupId] || 0) + 1
     updateDocumentTitle()
@@ -743,8 +854,10 @@ function handleRealtimeEvent(event: RealtimeEvent) {
     historyJob.value = event.historySyncJob
     if (event.historySyncJob.status === 'completed' && previousStatus !== 'completed' && event.historySyncJob.messagesInserted > 0) {
       olderHistoryNotice.value = ''
-      hasOlderMessages.value = true
-      void loadOlderMessages(false)
+      if (locatedContextMessageId.value === null) {
+        hasOlderMessages.value = true
+        void loadOlderMessages(false)
+      }
       void refreshDailyMessageStats()
     } else if (event.historySyncJob.status === 'completed') {
       olderHistoryNotice.value = '没有新增更早消息'
@@ -802,6 +915,13 @@ async function centerMessageUntilStable(messageID: number, requestIsCurrent: () 
 
 function updateAutoFollow() {
   if (messageLocationActive.value) {
+    autoFollowMessages.value = false
+    return
+  }
+  if (locatedContextMessageId.value !== null) {
+    const element = messageListRef.value
+    if (element && element.scrollTop < 80) void loadOlderMessages(false)
+    if (isNearMessageBottom(80)) void loadNewerMessages()
     autoFollowMessages.value = false
     return
   }
@@ -864,6 +984,31 @@ function updateDocumentTitle() {
 async function loadOlderMessages(triggerRemote = true) {
   if (messageLocationActive.value || loadingOlder.value || messages.value.length === 0) return
   olderHistoryNotice.value = ''
+  if (locatedContextMessageId.value !== null) {
+    if (!hasOlderMessages.value) return
+    const oldest = orderedMessages.value[0]
+    const groupID = selectedGroupId.value
+    const contextID = locatedContextMessageId.value
+    const requestKey = `${groupID}:${contextID}:${oldest.id}`
+    const request = olderMessageRequests.begin(requestKey)
+    const element = messageListRef.value
+    const oldHeight = element?.scrollHeight || 0
+    loadingOlder.value = true
+    try {
+      const context = await getMessageContext(oldest.id, 50, 0)
+      if (!olderMessageRequests.isCurrent(request, requestKey) || selectedGroupId.value !== groupID || locatedContextMessageId.value !== contextID) return
+      const existing = new Set(messages.value.map((item) => item.id))
+      messages.value.push(...context.items.filter((item) => item.id !== oldest.id && isDisplayableMessage(item) && !existing.has(item.id)))
+      hasOlderMessages.value = context.hasOlder
+      await nextTick()
+      if (element) element.scrollTop += element.scrollHeight - oldHeight
+    } catch (err) {
+      if (olderMessageRequests.isCurrent(request, requestKey)) error.value = err instanceof Error ? err.message : String(err)
+    } finally {
+      if (olderMessageRequests.isCurrent(request, requestKey)) loadingOlder.value = false
+    }
+    return
+  }
   if (!hasOlderMessages.value) {
     if (!triggerRemote) return
     loadingOlder.value = true
@@ -906,6 +1051,46 @@ async function loadOlderMessages(triggerRemote = true) {
     if (olderMessageRequests.isCurrent(request, `${currentMessageRequestKey()}:${oldest?.id || ''}`)) {
       loadingOlder.value = false
     }
+  }
+}
+
+async function loadNewerMessages() {
+  if (messageLocationActive.value || locatedContextMessageId.value === null || loadingNewer.value || !hasNewerMessages.value) return
+  const newest = orderedMessages.value.at(-1)
+  if (!newest) return
+  const groupID = selectedGroupId.value
+  const contextID = locatedContextMessageId.value
+  const requestKey = `${groupID}:${contextID}:${newest.id}`
+  const request = newerMessageRequests.begin(requestKey)
+  loadingNewer.value = true
+  try {
+    const context = await getMessageContext(newest.id, 0, 50)
+    if (!newerMessageRequests.isCurrent(request, requestKey) || selectedGroupId.value !== groupID || locatedContextMessageId.value !== contextID) return
+    const existing = new Set(messages.value.map((item) => item.id))
+    messages.value.push(...context.items.filter((item) => item.id !== newest.id && isDisplayableMessage(item) && !existing.has(item.id)))
+    hasNewerMessages.value = context.hasNewer
+  } catch (err) {
+    if (newerMessageRequests.isCurrent(request, requestKey)) error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    if (newerMessageRequests.isCurrent(request, requestKey)) loadingNewer.value = false
+  }
+}
+
+async function returnToLatestMessages() {
+  if (locatedContextMessageId.value === null) {
+    scrollMessagesToBottom(true)
+    return
+  }
+  cancelMessageLocation()
+  historyDayRequests.invalidate()
+  autoFollowMessages.value = true
+  newMessageCount.value = 0
+  hasOlderMessages.value = true
+  try {
+    await refreshMessages()
+    scrollMessagesToBottom(true)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
   }
 }
 
@@ -1028,6 +1213,8 @@ async function locateMessageInContext(message: Message) {
   }
 
   cancelMessageLocation()
+  messageRequests.invalidate()
+  messagesLoading.value = false
   const requestKey = `${groupID}:${message.id}`
   const request = locateMessageRequests.begin(requestKey)
   const requestIsCurrent = () =>
@@ -1050,39 +1237,13 @@ async function locateMessageInContext(message: Message) {
   window.clearTimeout(keywordSearchTimer)
   suppressKeywordSearch = false
 
-  messages.value = []
-  hasOlderMessages.value = true
-
   try {
-    await refreshMessages()
+    const context = await getMessageContext(message.id, locateContextSize, locateContextSize)
     if (!requestIsCurrent()) return
-
-    loadingOlder.value = true
-    let previousBoundary = ''
-    while (requestIsCurrent()) {
-      const currentMessages = orderedMessages.value
-      const targetIndex = currentMessages.findIndex((item) => item.id === message.id)
-      if (targetIndex >= 0 && (targetIndex >= locateContextSize || !hasOlderMessages.value)) break
-      if (!hasOlderMessages.value) break
-
-      const oldest = currentMessages[0]
-      const boundary = oldest?.sentAt || oldest?.capturedAt || ''
-      if (!boundary || boundary === previousBoundary) break
-      previousBoundary = boundary
-
-      const result = await listMessages({
-        groupId: groupID,
-        before: boundary,
-        limit: locatePageSize
-      })
-      if (!requestIsCurrent()) return
-
-      const rawItems = result.items || []
-      const merged = new Map(messages.value.map((item) => [item.id, item]))
-      for (const item of rawItems.filter(isDisplayableMessage)) merged.set(item.id, item)
-      messages.value = [...merged.values()]
-      hasOlderMessages.value = rawItems.length === locatePageSize
-    }
+    messages.value = context.items.filter(isDisplayableMessage)
+    hasOlderMessages.value = context.hasOlder
+    hasNewerMessages.value = context.hasNewer
+    locatedContextMessageId.value = message.id
 
     if (!requestIsCurrent()) return
     if (!messages.value.some((item) => item.id === message.id)) {
@@ -1099,7 +1260,6 @@ async function locateMessageInContext(message: Message) {
       return
     }
     autoFollowMessages.value = false
-    locatedContextMessageId.value = message.id
     locateHighlightTimer = window.setTimeout(() => {
       if (locatedMessageId.value === message.id) locatedMessageId.value = null
     }, 6000)
@@ -1178,6 +1338,15 @@ async function removeRule(rule: NotificationRule) {
 async function retryJob(item: NotificationOutboxItem) {
   await retryNotificationOutbox(item.id)
   outboxItems.value = (await listNotificationOutbox()).items || []
+}
+
+async function removeOutboxJob(item: NotificationOutboxItem) {
+  try {
+    await deleteNotificationOutbox(item.id)
+    outboxItems.value = outboxItems.value.filter((job) => job.id !== item.id)
+  } catch (err) {
+    antMessage.error(err instanceof Error ? err.message : String(err))
+  }
 }
 
 async function retryAllFailedJobs() {
@@ -1317,6 +1486,7 @@ onUnmounted(() => {
           <h2 v-else>{{ selectedGroup?.name || '消息流' }}</h2>
         </div>
         <div class="head-actions">
+          <a-button :disabled="!selectedGroup" @click="openHistoryCalendar"><CalendarOutlined />查看历史</a-button>
           <a-button
             :loading="historySyncProgressing"
             :disabled="!selectedGroup || historySyncActive"
@@ -1376,10 +1546,10 @@ onUnmounted(() => {
       <div ref="messageListRef" class="message-list" :class="{ 'message-location-active': messageLocationActive }" @scroll.passive="updateAutoFollow">
         <div class="message-content">
           <div v-if="selectedGroup && !messagesLoading" class="timeline-mark">
-            {{ selectedGroup.name }} · {{ hasActiveFilters ? `找到 ${orderedMessages.length} 条` : `最近 ${orderedMessages.length} 条` }}
+            {{ selectedGroup.name }} · {{ locatedContextMessageId !== null ? `历史消息 · 已加载 ${orderedMessages.length} 条` : hasActiveFilters ? `找到 ${orderedMessages.length} 条` : `最近 ${orderedMessages.length} 条` }}
           </div>
 
-          <button v-if="orderedMessages.length" class="load-older" type="button" :disabled="messageLocationActive || loadingOlder || historySyncActive" @click="handleLoadOlderClick">
+          <button v-if="orderedMessages.length && (locatedContextMessageId === null || hasOlderMessages)" class="load-older" type="button" :disabled="messageLocationActive || loadingOlder || (locatedContextMessageId === null && historySyncActive)" @click="handleLoadOlderClick">
             {{ loadOlderLabel }}
           </button>
 
@@ -1408,6 +1578,10 @@ onUnmounted(() => {
             @retry-media="retryFailedMessageMedia"
           />
 
+          <button v-if="locatedContextMessageId !== null && hasNewerMessages" class="load-older" type="button" :disabled="messageLocationActive || loadingNewer" @click="loadNewerMessages">
+            {{ loadingNewer ? '正在加载…' : '加载较新消息' }}
+          </button>
+
           <div v-if="!messagesLoading && orderedMessages.length === 0" class="empty-state">
             <span class="empty-icon">⌕</span>
             <strong>{{ emptyMessage }}</strong>
@@ -1422,9 +1596,9 @@ onUnmounted(() => {
         v-if="!autoFollowMessages && orderedMessages.length > 0"
         class="jump-bottom"
         type="button"
-        @click="scrollMessagesToBottom(true)"
+        @click="returnToLatestMessages"
       >
-        <span>{{ newMessageCount > 0 ? `${newMessageCount} 条新消息` : '回到底部' }}</span>
+        <span>{{ locatedContextMessageId !== null ? (newMessageCount > 0 ? `${newMessageCount} 条新消息 · 返回最新` : '返回最新消息') : (newMessageCount > 0 ? `${newMessageCount} 条新消息` : '回到底部') }}</span>
         <ArrowDownOutlined class="jump-bottom-icon" aria-hidden="true" />
       </button>
     </section>
@@ -1437,6 +1611,13 @@ onUnmounted(() => {
       :error="historyError"
       @close="historyDialogOpen = false"
       @submit="submitHistorySync"
+    />
+
+    <HistoryCalendarDialog
+      v-if="historyCalendarOpen"
+      :days="historyCalendarDays"
+      @close="closeHistoryCalendar"
+      @select="selectHistoryCalendarDay"
     />
 
     <ManagementCenter
@@ -1456,6 +1637,7 @@ onUnmounted(() => {
       @close="showNotifications = false"
       @retry-all="retryAllFailedJobs"
       @retry="retryJob"
+      @remove-outbox="removeOutboxJob"
       @open-rule="openRuleDialog"
       @edit-rule="editRule"
       @remove-rule="removeRule"

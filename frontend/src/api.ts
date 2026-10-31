@@ -303,6 +303,20 @@ export function getMessage(id: number, includeRaw = false) {
   return request<Message>(`/api/messages/${id}?includeRaw=${includeRaw}`)
 }
 
+export function getMessageContext(id: number, before = 20, after = 20) {
+  const query = new URLSearchParams({ before: String(before), after: String(after) })
+  return request<{ items: Message[]; hasOlder: boolean; hasNewer: boolean }>(`/api/messages/${id}/context?${query}`)
+}
+
+export function getGroupDayAnchor(groupId: number, from: string, to: string) {
+  const query = new URLSearchParams({ from, to })
+  return request<{ message: Message | null }>(`/api/groups/${groupId}/messages/day-anchor?${query}`)
+}
+
+export function getGroupMessageDays(groupId: number) {
+  return request<{ days: string[] }>(`/api/groups/${groupId}/message-days`)
+}
+
 export function resolveMessageMedia(id: number) {
   return request<{ messageId: number; queued: number }>(`/api/messages/${id}/resolve-media`, {
     method: 'POST'
@@ -397,6 +411,10 @@ export function listNotificationOutbox(limit = 100) {
 
 export function retryNotificationOutbox(id: number) {
   return request<{ status: string }>(`/api/notification-outbox/${id}/retry`, { method: 'POST' })
+}
+
+export function deleteNotificationOutbox(id: number) {
+  return request<void>(`/api/notification-outbox/${id}`, { method: 'DELETE' })
 }
 
 export function getReadiness() {

@@ -148,6 +148,12 @@ type ListMessagesParams struct {
 	IncludeRaw     bool
 }
 
+type MessageContext struct {
+	Items    []Message `json:"items"`
+	HasOlder bool      `json:"hasOlder"`
+	HasNewer bool      `json:"hasNewer"`
+}
+
 func (s *Store) UpsertGroup(ctx context.Context, params UpsertGroupParams) (Group, error) {
 	return upsertGroup(ctx, s.pool, params)
 }
@@ -688,6 +694,59 @@ func (s *Store) GetMessageByID(ctx context.Context, id int64, includeRaw bool) (
 	return messages[0], nil
 }
 
+func (s *Store) GetMessageContext(ctx context.Context, id int64, before int, after int) (MessageContext, error) {
+	target, err := s.GetMessageByID(ctx, id, false)
+	if err != nil {
+		return MessageContext{}, err
+	}
+	targetTime := target.CapturedAt
+	if target.SentAt != nil {
+		targetTime = *target.SentAt
+	}
+	result := MessageContext{Items: []Message{target}}
+	const visibleMessages = `
+		m.group_id = $1
+		and m.message_type <> 'event'
+		and coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'
+	`
+	if before > 0 {
+		older, err := queryMessages(ctx, s.pool, false, `
+			where `+visibleMessages+`
+			  and (coalesce(m.sent_at, m.captured_at), m.id) < ($2, $3)
+			order by coalesce(m.sent_at, m.captured_at) desc, m.id desc
+			limit $4
+		`, target.GroupID, targetTime, id, before+1)
+		if err != nil {
+			return MessageContext{}, err
+		}
+		result.HasOlder = len(older) > before
+		if result.HasOlder {
+			older = older[:before]
+		}
+		for i, j := 0, len(older)-1; i < j; i, j = i+1, j-1 {
+			older[i], older[j] = older[j], older[i]
+		}
+		result.Items = append(older, result.Items...)
+	}
+	if after > 0 {
+		newer, err := queryMessages(ctx, s.pool, false, `
+			where `+visibleMessages+`
+			  and (coalesce(m.sent_at, m.captured_at), m.id) > ($2, $3)
+			order by coalesce(m.sent_at, m.captured_at) asc, m.id asc
+			limit $4
+		`, target.GroupID, targetTime, id, after+1)
+		if err != nil {
+			return MessageContext{}, err
+		}
+		result.HasNewer = len(newer) > after
+		if result.HasNewer {
+			newer = newer[:after]
+		}
+		result.Items = append(result.Items, newer...)
+	}
+	return result, nil
+}
+
 func (s *Store) ListGroups(ctx context.Context, params ListGroupsParams) ([]Group, error) {
 	limit := normalizeLimit(params.Limit, 50, 200)
 	rows, err := s.pool.Query(ctx, `
@@ -835,6 +894,47 @@ func (s *Store) ListMessages(ctx context.Context, params ListMessagesParams) ([]
 		limit %s
 	`, addArg(limit))
 	return queryMessages(ctx, s.pool, params.IncludeRaw, whereSQL, args...)
+}
+
+// GetFirstGroupMessageInRange finds the first visible message on a selected day.
+func (s *Store) GetFirstGroupMessageInRange(ctx context.Context, groupID int64, from, to time.Time) (*Message, error) {
+	messages, err := queryMessages(ctx, s.pool, false, `
+		where m.group_id = $1
+		  and m.message_type <> 'event'
+		  and coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'
+		  and coalesce(m.sent_at, m.captured_at) >= $2
+		  and coalesce(m.sent_at, m.captured_at) < $3
+		order by coalesce(m.sent_at, m.captured_at) asc, m.id asc
+		limit 1
+	`, groupID, from, to)
+	if err != nil || len(messages) == 0 {
+		return nil, err
+	}
+	return &messages[0], nil
+}
+
+func (s *Store) ListGroupMessageDays(ctx context.Context, groupID int64) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		select distinct to_char((coalesce(m.sent_at, m.captured_at) at time zone 'Asia/Shanghai')::date, 'YYYY-MM-DD') as day
+		from weibo_messages m
+		where m.group_id = $1
+		  and m.message_type <> 'event'
+		  and coalesce(m.content, '') !~ '^微博群聊事件（类型 [0-9]+）$'
+		order by day
+	`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	days := make([]string, 0)
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return nil, err
+		}
+		days = append(days, day)
+	}
+	return days, rows.Err()
 }
 
 func queryMessages(ctx context.Context, db messageDB, includeRaw bool, whereSQL string, args ...any) ([]Message, error) {

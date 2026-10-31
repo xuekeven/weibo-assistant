@@ -88,6 +88,20 @@ func (s *Store) RetryNotificationOutbox(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (s *Store) DeleteNotificationOutbox(ctx context.Context, id int64) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		delete from notification_outbox
+		 where id = $1 and status in ('failed', 'retry')
+	`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return errors.New("notification job is not deletable")
+	}
+	return nil
+}
+
 func enqueueNotification(ctx context.Context, db messageDB, messageID int64, params EnqueueNotificationParams) (bool, error) {
 	// 该函数由消息事务内部调用：消息和通知任务要么一起成功，要么一起回滚。
 	content := strings.TrimSpace(params.Content)

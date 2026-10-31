@@ -81,7 +81,7 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
 
 <template>
   <div class="history-dialog-backdrop" role="presentation" @click.self="$emit('close')">
-    <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-dialog-title">
+    <section class="history-dialog history-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="history-dialog-title">
       <header>
         <div>
           <h3 id="history-dialog-title">消息回溯</h3>
@@ -115,9 +115,9 @@ function combineLocalDateTime(date: Dayjs, time: Dayjs) {
           </div>
         </label>
         <label>
-          <span class="history-field-heading">
-            <strong>最晚消息时间 <em>可选</em></strong>
-            <small>留空时保存从最新消息开始的回溯结果。</small>
+          <span class="history-field-heading latest-history-heading">
+            <strong>最晚消息时间</strong>
+            <small>可选，留空时保存从最新消息开始的回溯结果。</small>
           </span>
           <div class="history-date-time">
             <a-date-picker

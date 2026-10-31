@@ -1,0 +1,13 @@
+[Unit]
+Description=Summarize yesterday's Weibo group chat with Codex and send a WeCom image
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/xuekai/repos/weibo-assistant
+Environment=PATH=/home/xuekai/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/home/xuekai/.config/weibo-assistant/digest-network.env
+ExecStart=/usr/bin/python3 /home/xuekai/repos/weibo-assistant/scripts/daily-digest.py
+TimeoutStartSec=40min
+

@@ -24,6 +24,7 @@
 - 企业微信通知通过 outbox 异步投递，支持失败重试和状态记录。
 - 消息列表、实时更新、通知管理、每日消息统计和 CSV/JSON/Markdown 导出。
 - 健康检查、Prometheus 指标、结构化日志和 systemd 常驻部署。
+- 可选的 Codex CLI 每日群聊摘要：北京时间 08:00 汇总前一天消息，生成 PNG 并通过企微中转发送给指定成员。
 
 ## 运行架构
 
@@ -222,3 +223,31 @@ sudo systemctl restart weibo-assistant-server.service \
 curl http://localhost:6001/readyz
 curl 'http://localhost:6001/api/messages?limit=50&includeRaw=false'
 ```
+
+## 每日群聊摘要
+
+`scripts/daily-digest.py` 从本地 `server` 的完整消息导出接口读取目标群前一天（北京时间 00:00–24:00）的消息，使用 `codex exec` 归纳话题。金融投资、健康养生、社会热点、学习提升使用固定栏目名称，有内容时展示；其他栏目按当天内容灵活增加。没有实质讨论的栏目不展示，卡片高度随内容调整，不编造内容。普通结婚通知和祝福不进入日报。图片通过现有 `WEWORK_RELAY_*` 配置发送给 `WEWORK_RELAY_TOUSER`；此字段必须明确设置，脚本不会向全员发送。
+
+如果本机 Codex 需要 HTTP 代理，在 `~/.config/weibo-assistant/digest-network.env` 中设置 `http_proxy`、`https_proxy`、`all_proxy` 和 `no_proxy`；该文件由 systemd 用户服务读取，权限应为 `600`。代理应在机器启动后持续可用。
+
+先登录 Codex CLI，并试运行（不会发送企微）：
+
+```bash
+python3 scripts/daily-digest.py --dry-run
+```
+
+图片保存在 `/home/xuekai/repos/investment-journal/pictures/weibo-daily/`，摘要和防重发标记保存在 `~/.local/state/weibo-assistant/daily-digest/`。确认图片后安装用户定时器：
+
+可在 `.env` 中设置 `DAILY_DIGEST_STYLE`，默认为双列浅色卡片 `cards`；也保留 `carbon`、`spectrum`、`polaris` 和旧版风格。更换后影响后续新生成的日报，不会改动已发送的图片；用 `python3 scripts/daily-digest.py --date YYYY-MM-DD --preview-styles` 可从已保存摘要生成预览，不发送企微。
+
+```bash
+install -Dm644 deploy/systemd/weibo-assistant-digest.service ~/.config/systemd/user/weibo-assistant-digest.service
+install -Dm644 deploy/systemd/weibo-assistant-digest.timer ~/.config/systemd/user/weibo-assistant-digest.timer
+mkdir -p ~/.local/share/systemd/timers
+touch ~/.local/share/systemd/timers/stamp-weibo-assistant-digest.timer
+systemctl --user daemon-reload
+systemctl --user enable --now weibo-assistant-digest.timer
+systemctl --user list-timers weibo-assistant-digest.timer
+```
+
+同一天重复运行时，已成功发送的日报不会重发；中转服务也使用固定的每日幂等键。检查执行日志：`journalctl --user -u weibo-assistant-digest.service -n 100`。

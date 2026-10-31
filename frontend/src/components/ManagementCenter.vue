@@ -46,6 +46,7 @@ const emit = defineEmits<{
   close: []
   retryAll: []
   retry: [item: NotificationOutboxItem]
+  removeOutbox: [item: NotificationOutboxItem]
   openRule: []
   editRule: [rule: NotificationRule]
   removeRule: [rule: NotificationRule]
@@ -159,7 +160,10 @@ function historyModeLabel(mode: HistorySyncJob['mode']) {
         </template>
         <p v-else class="notify-attempts">尝试 {{ item.attemptCount }}/{{ item.maxAttempts }}<template v-if="item.status === 'retry'"> · 下次 {{ formatTime(item.nextAttemptAt) }}</template></p>
         <p v-if="item.lastError">{{ item.lastError }}</p>
-        <button v-if="item.status === 'failed' || item.status === 'retry'" type="button" @click="$emit('retry', item)">立即重试</button>
+        <div v-if="item.status === 'failed' || item.status === 'retry'" class="notify-actions">
+          <button type="button" @click="$emit('retry', item)">立即重试</button>
+          <button class="notify-delete" type="button" :aria-label="`删除通知任务 ${item.id}`" @click="$emit('removeOutbox', item)">删除</button>
+        </div>
       </article>
       <div v-if="outboxItems.length === 0" class="panel-empty">暂无通知任务</div>
     </div>

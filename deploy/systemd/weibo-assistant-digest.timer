@@ -1,0 +1,12 @@
+[Unit]
+Description=Run yesterday's Weibo group digest every day at 08:00 Beijing time
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Asia/Shanghai
+AccuracySec=1s
+Persistent=true
+Unit=weibo-assistant-digest.service
+
+[Install]
+WantedBy=timers.target
+
